@@ -28,7 +28,7 @@ Ensure you have Python 3 installed, along with the required libraries.
 
 **1. Clone the repository**
 ```bash
-git clone https://github.com/kumbhar-ajay/netcut_pro
+git clone https://github.com/MatsoDev/Fnet
 cd netcut_pro
 sudo python3 netcut.py
 
