@@ -63,6 +63,85 @@ class TrafficMonitor:
         with self.lock:
             return {ip: round(b/1024, 1) for ip, b in self.traffic.items()}
 
+    def snapshot_bytes(self):
+        with self.lock:
+            return dict(self.traffic)
+
+    def total_bytes(self):
+        with self.lock:
+            return sum(self.traffic.values())
+
+class QuotaTracker:
+    """Monthly internet quota tracking + auto-throttle / auto-block.
+
+    Samples total traffic flowing through the interface, accumulates the
+    delta into a monthly counter, and decides when to start throttling or
+    blocking all non-self devices based on thresholds.
+    """
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.enabled = False
+        self.limit_gb = 0.0
+        self.throttle_kbps = 300
+        self.throttle_pct = 80.0
+        self.block_pct = 100.0
+        self.used_bytes = 0.0
+        self.month_start = time.time()
+        self.prev_snapshot = {}
+        self.last_pct = 0.0
+        self.mode = None
+        self.throttled_ips = set()
+        self.blocked_ips = set()
+
+    def load(self, cfg):
+        if not isinstance(cfg, dict): return
+        with self.lock:
+            self.enabled = bool(cfg.get("enabled", self.enabled))
+            self.limit_gb = float(cfg.get("limit_gb", self.limit_gb))
+            self.throttle_kbps = int(cfg.get("throttle_kbps", self.throttle_kbps))
+            self.throttle_pct = float(cfg.get("throttle_pct", self.throttle_pct))
+            self.block_pct = float(cfg.get("block_pct", self.block_pct))
+            self.used_bytes = float(cfg.get("used_bytes", self.used_bytes))
+            self.month_start = float(cfg.get("month_start", self.month_start))
+
+    def to_dict(self):
+        with self.lock:
+            return {"enabled": self.enabled, "limit_gb": self.limit_gb,
+                    "throttle_kbps": self.throttle_kbps,
+                    "throttle_pct": self.throttle_pct,
+                    "block_pct": self.block_pct,
+                    "used_mb": round(self.used_bytes / 1048576, 1),
+                    "used_pct": round(self.percent(), 1),
+                    "mode": self.mode,
+                    "month_start": self.month_start}
+
+    def reset(self):
+        with self.lock:
+            self.used_bytes = 0.0
+            self.month_start = time.time()
+            self.throttled_ips.clear()
+            self.blocked_ips.clear()
+            self.mode = None
+
+    def add_usage(self, delta):
+        if delta <= 0: return
+        with self.lock:
+            self.used_bytes += delta
+
+    def percent(self):
+        if not self.limit_gb or self.limit_gb <= 0:
+            return 0.0
+        return (self.used_bytes / (self.limit_gb * 1e9)) * 100.0
+
+    def state(self):
+        with self.lock:
+            return {"enabled": self.enabled, "limit_gb": self.limit_gb,
+                    "throttle_kbps": self.throttle_kbps,
+                    "throttle_pct": self.throttle_pct,
+                    "block_pct": self.block_pct,
+                    "used_bytes": self.used_bytes,
+                    "month_start": self.month_start}
+
 class TokenBucketForwarder:
     """Real per-device bandwidth shaping (MITM relay).
 
@@ -163,10 +242,17 @@ class NetCutController:
         self.scanning = False; self.scan_progress = 0
         self.traffic = TrafficMonitor()
         self.forwarder = TokenBucketForwarder()
+        self.quota = QuotaTracker()
+        self.quota.load(self.saved_data.get('quota'))
+        self._last_traffic_total = 0
         self.auto_scan_stop = threading.Event()
         self.auto_scan_thread = None
         self.our_mac = None
         self.our_ip = None
+
+    def save_quota(self):
+        self.saved_data['quota'] = self.quota.state()
+        with open(DATA_FILE, 'w') as f: json.dump(self.saved_data, f, indent=2)
 
     def load_saved(self):
         if DATA_FILE.exists():
@@ -413,6 +499,48 @@ class NetCutController:
                 return True
         return False
 
+    def throttle_all(self, kbps):
+        count = 0
+        for d in self.devices:
+            if d.ip == self.gateway_ip or d.mac == self.our_mac:
+                continue
+            if d.state == "Offline":
+                continue
+            ok, _ = self.set_throttle(d.mac, kbps)
+            if ok: count += 1
+        return count
+
+    def _accumulate_usage(self):
+        try:
+            total = self.traffic.total_bytes()
+            delta = total - self._last_traffic_total
+            self._last_traffic_total = total
+            if delta > 0:
+                self.quota.add_usage(delta)
+        except Exception:
+            pass
+
+    def _enforce_quota(self):
+        self._accumulate_usage()
+        if not self.quota.enabled or self.quota.limit_gb <= 0:
+            return
+        pct = self.quota.percent()
+        if pct >= self.quota.block_pct and self.quota.mode != "block":
+            self.quota.mode = "block"
+            for d in self.devices:
+                if d.ip == self.gateway_ip or d.mac == self.our_mac:
+                    continue
+                if d.state != "Disconnected":
+                    self.toggle_device(d.mac)
+        elif pct >= self.quota.throttle_pct and self.quota.mode != "throttle":
+            self.quota.mode = "throttle"
+            self.throttle_all(self.quota.throttle_kbps)
+        self.save_quota()
+
+    def quota_info(self):
+        self._accumulate_usage()
+        return self.quota.to_dict()
+
     def restore_all(self):
         self.traffic.stop()
         self.forwarder.set_stop(); self.forwarder.clear()
@@ -432,6 +560,7 @@ class NetCutController:
                 found = self.arp_scan(passes=2)
                 self.merge_scan_results(found)
                 self.devices.sort(key=lambda x: x.ip)
+                self._enforce_quota()
             except Exception:
                 pass
 
@@ -482,6 +611,30 @@ def rename():
 @app.route('/api/restore_all', methods=['POST'])
 def restore_all():
     controller.restore_all(); return jsonify({"status": "ok"})
+
+@app.route('/api/throttle_all', methods=['POST'])
+def throttle_all():
+    data = request.get_json()
+    count = controller.throttle_all(int(data.get('kbps', 0)))
+    return jsonify({"status": "ok", "count": count})
+
+@app.route('/api/quota', methods=['GET'])
+def quota_get():
+    return jsonify(controller.quota_info())
+
+@app.route('/api/quota', methods=['POST'])
+def quota_set():
+    data = request.get_json()
+    if "enabled" in data: controller.quota.enabled = bool(data["enabled"])
+    if "limit_gb" in data: controller.quota.limit_gb = float(data["limit_gb"])
+    if "throttle_kbps" in data: controller.quota.throttle_kbps = int(data["throttle_kbps"])
+    if "throttle_pct" in data: controller.quota.throttle_pct = float(data["throttle_pct"])
+    if "block_pct" in data: controller.quota.block_pct = float(data["block_pct"])
+    if data.get("reset"):
+        controller.quota.reset()
+    controller.save_quota()
+    controller._enforce_quota()
+    return jsonify(controller.quota_info())
 
 def cleanup():
     print("\nRestoring all..."); controller.restore_all()

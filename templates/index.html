@@ -66,6 +66,32 @@
   .dot-gray { background: #484f58; }
   .dot-yellow { background: #d29922; }
 
+  .quota-panel {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    padding: 10px 14px; background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; margin-bottom: 12px; font-size: 13px; position: relative;
+  }
+  .quota-toggle { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .quota-toggle b { color: #d29922; }
+  .quota-num {
+    width: 64px; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+    border-radius: 4px; padding: 2px 5px; font-size: 12px;
+  }
+  .quota-sm { width: 48px; }
+  .quota-used { color: #8b949e; }
+  .quota-used b { color: #c9d1d9; }
+  #quotaMode { font-size: 11px; padding: 1px 6px; border-radius: 8px; }
+  #quotaMode.active-block { background: #da363333; color: #f85149; }
+  #quotaMode.active-throttle { background: #d2992233; color: #d29922; }
+  .quota-bar {
+    width: 100%; height: 4px; background: #21262d; border-radius: 2px;
+    overflow: hidden; margin-top: 4px;
+  }
+  .quota-bar-fill {
+    height: 100%; background: linear-gradient(90deg, #3fb950, #d29922, #da3633);
+    border-radius: 2px; transition: width .4s;
+  }
+
   .sort-group { display: flex; gap: 6px; align-items: center; margin-left: auto; }
   .sort-group label { font-size: 12px; color: #8b949e; }
   .sort-btn { font-size: 12px; padding: 3px 10px; border-radius: 4px; background: #161b22; color: #8b949e; }
@@ -210,12 +236,24 @@
   <div class="toolbar">
     <button class="btn btn-primary" onclick="scanNetwork()" id="scanBtn"> Scan</button>
     <button class="btn btn-danger" onclick="restoreAll()" id="restoreBtn"> Restore All</button>
+    <button class="btn" onclick="throttleAll()"> Throttle All</button>
     <div class="sort-group">
       <label>Sort:</label>
       <button class="btn btn-sm sort-btn active" data-sort="ip" onclick="setSort('ip')">IP</button>
       <button class="btn btn-sm sort-btn" data-sort="traffic" onclick="setSort('traffic')">Traffic</button>
       <button class="btn btn-sm sort-btn" data-sort="name" onclick="setSort('name')">Name</button>
     </div>
+  </div>
+
+  <div class="quota-panel">
+    <label class="quota-toggle"><input type="checkbox" id="quotaEnabled" onchange="saveQuota()"> <b>Quota Auto-Mode</b></label>
+    <span>Limit <input type="number" id="quotaLimit" min="0" step="0.5" value="0" onchange="saveQuota()" class="quota-num"> GB</span>
+    <span>Throttle at <input type="number" id="quotaThrottlePct" min="1" max="100" value="80" onchange="saveQuota()" class="quota-num quota-sm">%</span>
+    <span>Block at <input type="number" id="quotaBlockPct" min="1" max="100" value="100" onchange="saveQuota()" class="quota-num quota-sm">%</span>
+    <span>Speed <input type="number" id="quotaKbps" min="1" value="300" onchange="saveQuota()" class="quota-num"> kbps</span>
+    <span class="quota-used">Used: <b id="quotaUsed">0 MB</b> (<span id="quotaPct">0%</span>) <span id="quotaMode"></span></span>
+    <button class="btn btn-sm" onclick="resetQuota()">Reset</button>
+    <div class="quota-bar"><div class="quota-bar-fill" id="quotaBar"></div></div>
   </div>
 
   <div class="legend">
@@ -325,6 +363,51 @@ async function setThrottle(mac, kbps) {
   loadDevices();
 }
 
+async function throttleAll() {
+  const v = prompt('Set speed limit for ALL devices (kbps). 0 = remove limit:', 300);
+  if (v === null) return;
+  const d = await api('/api/throttle_all', { method: 'POST', body: JSON.stringify({ kbps: parseInt(v) }) });
+  toast(`Applied to ${d.count} device(s)`);
+  loadDevices();
+}
+
+async function loadQuota() {
+  try {
+    const q = await api('/api/quota');
+    document.getElementById('quotaEnabled').checked = q.enabled;
+    document.getElementById('quotaLimit').value = q.limit_gb;
+    document.getElementById('quotaThrottlePct').value = q.throttle_pct;
+    document.getElementById('quotaBlockPct').value = q.block_pct;
+    document.getElementById('quotaKbps').value = q.throttle_kbps;
+    const used = document.getElementById('quotaUsed');
+    used.textContent = q.used_mb >= 1024 ? (q.used_mb/1024).toFixed(2) + ' GB' : q.used_mb + ' MB';
+    document.getElementById('quotaPct').textContent = q.used_pct + '%';
+    document.getElementById('quotaBar').style.width = Math.min(q.used_pct, 100) + '%';
+    const mode = document.getElementById('quotaMode');
+    if (q.mode === 'block') { mode.textContent = 'BLOCKING'; mode.className = 'active-block'; }
+    else if (q.mode === 'throttle') { mode.textContent = 'THROTTLING'; mode.className = 'active-throttle'; }
+    else { mode.textContent = ''; mode.className = ''; }
+  } catch(e) {}
+}
+
+async function saveQuota() {
+  const body = {
+    enabled: document.getElementById('quotaEnabled').checked,
+    limit_gb: parseFloat(document.getElementById('quotaLimit').value) || 0,
+    throttle_pct: parseFloat(document.getElementById('quotaThrottlePct').value) || 80,
+    block_pct: parseFloat(document.getElementById('quotaBlockPct').value) || 100,
+    throttle_kbps: parseInt(document.getElementById('quotaKbps').value) || 300
+  };
+  await api('/api/quota', { method: 'POST', body: JSON.stringify(body) });
+  loadQuota();
+}
+
+async function resetQuota() {
+  if (!confirm('Reset monthly usage to 0?')) return;
+  await api('/api/quota', { method: 'POST', body: JSON.stringify({ reset: true }) });
+  loadQuota();
+}
+
 function renameDevice(mac, input, oldName) {
   const name = input.value.trim();
   if (name === oldName) return;
@@ -427,7 +510,8 @@ function esc(s) { const e=document.createElement('div'); e.textContent=s; return
 
 loadInfo();
 loadDevices();
-setInterval(() => { loadInfo(); loadDevices(); }, 3000);
+loadQuota();
+setInterval(() => { loadInfo(); loadDevices(); loadQuota(); }, 3000);
 </script>
 </body>
 </html>
