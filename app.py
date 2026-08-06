@@ -384,8 +384,8 @@ class TokenBucketForwarder:
                         b = q.popleft()
                         t["qbytes"] -= len(b)
                         if not self._send(b): self.stats["dropped"] += 1
-                        if self.stop_event.is_set(): return
                         did = True
+                        if self.stop_event.is_set(): return
                     continue
                 rate = (t["kbps"] * 1000) / 8.0
                 t["tokens"] = min(t["tokens"] + (now - t["last"]) * rate, rate * 1.0)
@@ -397,6 +397,7 @@ class TokenBucketForwarder:
                     t["tokens"] -= len(b)
                     t["bw_bytes"] += len(b)
                     t["bw_last"] = now
+                    t["sent_cycles"] = t.get("sent_cycles", 0) + 1
                     if not self._send(b): self.stats["dropped"] += 1
                     did = True
                     if self.stop_event.is_set(): return
@@ -408,8 +409,11 @@ class TokenBucketForwarder:
                         excess -= len(b)
                         self.stats["dropped"] += 1
                         if self.stop_event.is_set(): return
-            if not did:
-                time.sleep(0.002)
+            # Always yield to the sniff thread so it can feed us (and so the
+            # machine's own TCP stack/timers aren't starved). Without this the
+            # drain busy-spins, tokens refill with dt~0 (cap not honored) and
+            # the whole PC's networking stalls -> device looks offline.
+            time.sleep(0.001)
 
     def _on_packet(self, pkt):
         try:
