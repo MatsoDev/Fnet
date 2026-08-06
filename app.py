@@ -21,6 +21,7 @@ class Device:
         self.state = "Connected"
         self.spoof_stop = None; self.spoof_thread = None
         self.throttle_kbps = None
+        self.watch = False
         self.first_seen = time.time()
         self.last_seen = time.time()
 
@@ -33,6 +34,7 @@ class Device:
                 "vendor": self.vendor, "custom_name": self.custom_name,
                 "state": self.state, "display_name": dn,
                 "throttle_kbps": self.throttle_kbps,
+                "watch": self.watch,
                 "first_seen": self.first_seen, "last_seen": self.last_seen}
 
 class TrafficMonitor:
@@ -274,7 +276,11 @@ class TokenBucketForwarder:
     physically crosses our NIC. This class sniffs those frames, enforces a
     token bucket per target (dropping frames that exceed the configured
     bit-rate), and re-transmits the allowed frames out the same NIC on the
-    correct leg. The poison itself is kept alive by the caller's spoof loop.
+    correct leg. Watch-only targets are relayed at full speed without shaping.
+
+    IMPORTANT: the relaying socket is opened ONCE and reused, because
+    scapy's sendp() opens and closes a raw socket on every call which
+    collapses throughput (devices look "cut off" at high bit-rates).
     """
     def __init__(self):
         self._targets = {}
@@ -283,6 +289,7 @@ class TokenBucketForwarder:
         self.stop_event = threading.Event()
         self.gateway_ip = None; self.gateway_mac = None
         self.our_mac = None; self.our_ip = None; self.interface = None
+        self.sock = None
 
     def configure(self, gateway_ip=None, gateway_mac=None, our_mac=None, our_ip=None, interface=None):
         with self.lock:
@@ -292,12 +299,13 @@ class TokenBucketForwarder:
             if our_ip is not None: self.our_ip = our_ip
             if interface is not None: self.interface = interface
 
-    def set_target(self, ip, kbps, mac=None):
+    def set_target(self, ip, kbps, mac=None, watch=False):
         with self.lock:
             if kbps and kbps > 0:
                 bps = (kbps * 1000) / 8.0
                 self._targets[ip] = {"kbps": kbps, "tokens": bps,
-                                     "last": time.time(), "mac": mac}
+                                     "last": time.time(), "mac": mac,
+                                     "watch": bool(watch)}
             else:
                 self._targets.pop(ip, None)
 
@@ -324,6 +332,10 @@ class TokenBucketForwarder:
             self._targets.clear()
 
     def _run(self, interface):
+        try:
+            self.sock = open_l2socket(interface)
+        except Exception:
+            self.sock = None
         sniff(iface=interface, prn=self._on_packet, store=0,
               stop_filter=lambda p: self.stop_event.is_set())
 
@@ -345,19 +357,27 @@ class TokenBucketForwarder:
             else:
                 entry = self._entry(src) or self._entry(dst) or None
             if entry is None: return
-            now = time.time()
-            bps = (entry["kbps"] * 1000) / 8.0
-            entry["tokens"] = min(entry["tokens"] + (now - entry["last"]) * bps, bps * 2)
-            entry["last"] = now
-            if len(pkt) > entry["tokens"]: return
-            entry["tokens"] -= len(pkt)
+            if not entry["watch"]:
+                now = time.time()
+                bps = (entry["kbps"] * 1000) / 8.0
+                entry["tokens"] = min(entry["tokens"] + (now - entry["last"]) * bps, bps * 2)
+                entry["last"] = now
+                if len(pkt) > entry["tokens"]: return
+                entry["tokens"] -= len(pkt)
             if src == gw:
                 out = Ether(dst=entry["mac"], src=self.our_mac) / pkt[IP]
             else:
                 out = Ether(dst=self.gateway_mac, src=self.our_mac) / pkt[IP]
-            sendp(out, iface=self.interface, verbose=False)
+            if self.sock is not None:
+                self.sock.send(bytes(out))
+            else:
+                sendp(out, iface=self.interface, verbose=False)
         except Exception:
             pass
+
+def open_l2socket(iface):
+    from scapy.config import conf
+    return conf.L2socket(iface=iface)
 
 class NetCutController:
     def __init__(self):
@@ -578,6 +598,7 @@ class NetCutController:
                 if d.mac == self.our_mac: return False, "Cannot touch your own device."
                 if d.state == "Connected":
                     d.state = "Disconnected"
+                    d.watch = False
                     self._start_spoof(d)
                     self.save_device(mac, {"state": "Disconnected", "throttle_kbps": None})
                     return True, "Disconnected"
@@ -592,6 +613,7 @@ class NetCutController:
                     self._restore(d)
                     d.state = "Connected"
                     d.throttle_kbps = None
+                    d.watch = False
                     self.forwarder.set_target(d.ip, 0)
                     self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
                     return True, "Connected"
@@ -607,15 +629,40 @@ class NetCutController:
                     self._restore(d)
                     d.state = "Connected"
                     d.throttle_kbps = None
+                    d.watch = False
                     self.forwarder.set_target(d.ip, 0)
                     self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
                     return True, "Restored"
                 d.throttle_kbps = kbps
                 d.state = "Throttled"
+                d.watch = False
                 self._start_spoof(d)
                 self.forwarder.set_target(d.ip, kbps, d.mac)
                 self.save_device(mac, {"state": "Throttled", "throttle_kbps": kbps})
                 return True, f"Throttled to {kbps} kbps"
+        return False, "Not found."
+
+    def set_watch(self, mac, watch):
+        for d in self.devices:
+            if d.mac == mac:
+                if d.ip == self.gateway_ip: return False, "Cannot touch gateway."
+                if d.mac == self.our_mac: return False, "Cannot watch your own device."
+                if watch:
+                    d.watch = True
+                    d.state = "Watched"
+                    d.throttle_kbps = None
+                    self._start_spoof(d)
+                    self.forwarder.set_target(d.ip, 30000, d.mac, watch=True)
+                    self.save_device(mac, {"state": "Watched", "throttle_kbps": None})
+                    return True, "Watched"
+                else:
+                    d.watch = False
+                    self._stop_spoof(d)
+                    self._restore(d)
+                    d.state = "Connected"
+                    self.forwarder.set_target(d.ip, 0)
+                    self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
+                    return True, "Connected"
         return False, "Not found."
 
     def rename_device(self, mac, name):
@@ -677,6 +724,7 @@ class NetCutController:
             self._stop_spoof(d); self._restore(d)
             d.state = "Connected"
             d.throttle_kbps = None
+            d.watch = False
             self.save_device(d.mac, {"state": "Connected", "throttle_kbps": None})
 
     def auto_scan_loop(self):
@@ -728,6 +776,12 @@ def toggle():
 def throttle():
     data = request.get_json()
     ok, s = controller.set_throttle(data['mac'], int(data.get('kbps', 0)))
+    return jsonify({"success": ok, "state": s})
+
+@app.route('/api/watch', methods=['POST'])
+def watch():
+    data = request.get_json()
+    ok, s = controller.set_watch(data['mac'], bool(data.get('watch', False)))
     return jsonify({"success": ok, "state": s})
 
 @app.route('/api/rename', methods=['POST'])

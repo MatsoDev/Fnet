@@ -18,7 +18,7 @@ An interactive network management, auditing, and **bandwidth control** tool writ
 
 ### Throttling (Real Bandwidth Shaping)
 * **Per-Device Speed Control** — Drag a slider on any device card to cap its internet speed from **0 up to 30 Mbps** (router-speed default).
-* **Real MITM Rate Limiting** — `TokenBucketForwarder` ARPs-poison the target so its traffic crosses your NIC, then applies a token bucket to the relayed frames — dropping what exceeds your configured bit-rate. WhatsApp/text keeps working; heavy video throttles down.
+* **Real MITM Rate Limiting** — `TokenBucketForwarder` ARPs-poison the target so its traffic crosses your NIC, then applies a token bucket to the relayed frames — dropping what exceeds your configured bit-rate. WhatsApp/text keeps working; heavy video throttles down. The relay uses a **single persistent raw socket** (not one socket per packet) so full-speed links still relay reliably.
 * **Throttle All** — One-click apply a limit to every device at once.
 * **Persistent state** — Limits survive rescans (stored in `devices.json`).
 
@@ -27,6 +27,7 @@ Watch which websites each device is visiting, live:
 * Pulled from **TLS SNI** (HTTPS), **DNS queries**, and **HTTP `Host` headers** — no decryption needed.
 * Per-device domain list with hit counts and last-seen timestamps.
 * **Watch Traffic** modal with 60s / 5min / 30min / all-time ranges.
+* **Per-device "Watch" toggle** — press Watch on any card to relay that device through your NIC at full speed (no throttling) so its traffic becomes visible even when you don't want to limit it. Ideal for access points / routers behind which whole households sit (their domain usage then shows in the watch modal). Watching does *not* block or slow the device.
 
 ### Quota Auto-Mode
 Save your router's monthly internet allowance automatically:

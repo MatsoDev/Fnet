@@ -168,6 +168,7 @@
   }
   .device-card.disconnected { border-color: #da3633; background: #1c1010; }
   .device-card.throttled { border-color: #d29922; background: #1c160d; }
+  .device-card.watched { border-color: #58a6ff; background: #0d1720; }
   .device-card.router { border-color: #3fb950; background: #0d1f0d; }
   .device-card.offline { border-color: #30363d; opacity: .65; }
 
@@ -177,6 +178,7 @@
   }
   .device-card.disconnected .device-status { background: #da3633; }
   .device-card.throttled .device-status { background: #d29922; }
+  .device-card.watched .device-status { background: #58a6ff; }
   .device-card.router .device-status { background: #3fb950; }
   .device-card.offline .device-status { background: #484f58; }
 
@@ -225,6 +227,13 @@
     transition: transform .2s;
   }
   .toggle-btn.off::after { transform: translateX(16px); }
+  .btn-watch {
+    font-size: 10px; padding: 3px 8px; border-radius: 8px; cursor: pointer;
+    border: 1px solid #58a6ff; color: #58a6ff; background: transparent;
+    white-space: nowrap; line-height: 14px;
+  }
+  .btn-watch.on { background: #58a6ff; color: #fff; }
+  .btn-watch:hover { background: #58a6ff26; }
   .toggle-btn:disabled { opacity: .5; cursor: not-allowed; }
 
   .toast {
@@ -414,6 +423,13 @@ async function setThrottle(mac, kbps) {
   loadDevices();
 }
 
+async function setWatch(mac, watch) {
+  const d = await api('/api/watch', { method: 'POST', body: JSON.stringify({ mac, watch }) });
+  if (!d.success) { toast(d.state, 'error'); loadDevices(); return; }
+  toast(d.state === 'Watched' ? 'Now watching traffic for this device' : 'Watch stopped');
+  loadDevices();
+}
+
 async function throttleAll() {
   const v = prompt('Set speed limit for ALL devices (kbps). 0 = remove limit:', 300);
   if (v === null) return;
@@ -561,6 +577,7 @@ function render(devices) {
     const isOff = dev.state === 'Disconnected';
     const isOffline = dev.state === 'Offline';
     const isThr = dev.state === 'Throttled';
+    const isWatch = !!dev.watch || dev.state === 'Watched';
     if (isThr) th++;
     if (isRouter || (!isOff && !isOffline && !isThr)) c++;
     else if (isOff) d++;
@@ -568,15 +585,16 @@ function render(devices) {
 
     const name = dev.custom_name || dev.display_name;
     const bw = Math.min(dev.traffic_kb / 10, 100);
-    const thrKbps = dev.throttle_kbps || 0;
+    const thrKbps = isWatch ? 0 : (dev.throttle_kbps || 0);
 
-    return `<div class="device-card${isOff ? ' disconnected' : ''}${isThr ? ' throttled' : ''}${isRouter ? ' router' : ''}${isOffline ? ' offline' : ''}">
+    return `<div class="device-card${isOff ? ' disconnected' : ''}${isThr ? ' throttled' : ''}${isWatch ? ' watched' : ''}${isRouter ? ' router' : ''}${isOffline ? ' offline' : ''}">
       <div class="device-status"></div>
       <div class="device-info">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <div class="device-name" onclick="startRename(this,'${dev.mac}','${esc(name)}')" title="Click to rename">${esc(name)}</div>
           ${isOff ? '<span class="device-badge badge-cut">BLOCKED</span>' : ''}
           ${isThr ? `<span class="device-badge badge-throttle">LIMIT ${fmtSpeed(thrKbps)}</span>` : ''}
+          ${isWatch ? '<span class="device-badge badge-throttle">WATCHING</span>' : ''}
           ${isOffline ? '<span class="device-badge badge-offline">OFFLINE</span>' : ''}
         </div>
         <div class="device-meta">
@@ -593,13 +611,16 @@ function render(devices) {
         ${isRouter ? '<span style="font-size:11px;color:#3fb950">Gateway</span>' : `
           ${isOffline ? '' : `
           <div class="throttle-ctl">
-            <span class="throttle-label">Limit <b>${thrKbps ? fmtSpeed(thrKbps) : 'Off'}</b></span>
-            <input type="range" class="throttle-slider" min="0" max="30000" step="100" value="${thrKbps}"
+            <span class="throttle-label">Limit <b>${thrKbps ? fmtSpeed(thrKbps) : (isWatch ? 'Watch' : 'Off')}</b></span>
+            ${isWatch ? '' : `<input type="range" class="throttle-slider" min="0" max="30000" step="100" value="${thrKbps}"
               oninput="this.closest('.device-card').querySelector('.throttle-label b').textContent = (this.value ? fmtSpeed(this.value) : 'Off')"
-              onchange="setThrottle('${dev.mac}', this.value)" title="Throttle speed (0 - 30 Mbps)">
+              onchange="setThrottle('${dev.mac}', this.value)" title="Throttle speed (0 - 30 Mbps)">`}
           </div>
           `}
-          <button class="toggle-btn ${isOff?'off':'on'}" onclick="toggleDevice('${dev.mac}')" title="${isOff?'Restore':'Block'}"></button>
+          <div style="display:flex;gap:6px;align-items:center">
+            <button class="btn btn-watch ${isWatch?'on':''}" onclick="setWatch('${dev.mac}', ${isWatch?'false':'true'})" title="Watch traffic for this device (relays at full speed)">${isWatch?'Watching':'Watch'}</button>
+            <button class="toggle-btn ${isOff?'off':'on'}" onclick="toggleDevice('${dev.mac}')" title="${isOff?'Restore':'Block'}"></button>
+          </div>
         `}
       </div>
     </div>`;
