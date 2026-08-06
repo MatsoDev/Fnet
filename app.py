@@ -438,8 +438,12 @@ class TokenBucketForwarder:
 
     def report(self):
         with self.lock:
-            return {"targets": dict(self._targets),
-                    "stats": dict(self.stats)}
+            targets = {ip: {"kbps": t["kbps"], "mac": t["mac"],
+                            "watch": t["watch"],
+                            "qbytes": t["qbytes"],
+                            "queued_frames": len(t["q"])}
+                       for ip, t in self._targets.items()}
+            return {"targets": targets, "stats": dict(self.stats)}
 
 def open_l2socket(iface):
     from scapy.config import conf
