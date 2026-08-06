@@ -2,7 +2,7 @@
 import os, sys, json, time, signal, threading, socket, subprocess, re, urllib.request, struct
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import netifaces
 from scapy.all import *
@@ -303,7 +303,6 @@ class TokenBucketForwarder:
             if interface is not None: self.interface = interface
 
     def set_target(self, ip, kbps, mac=None, watch=False):
-        from collections import deque
         with self.lock:
             if kbps and kbps > 0:
                 self._targets[ip] = {"kbps": kbps, "mac": mac,
@@ -370,7 +369,7 @@ class TokenBucketForwarder:
         return False
 
     def _drain(self):
-        MAX_Q = 1024 * 1024  # 1 MB buffer per target allows bursts without collapse
+        MAX_Q = 256 * 1024  # ~0.2s latency bound at 11 Mbps, not a 1s+ pipe
         while not self.stop_event.is_set():
             now = time.time()
             did = False
@@ -391,13 +390,25 @@ class TokenBucketForwarder:
                 t["tokens"] = min(t["tokens"] + (now - t["last"]) * rate, rate * 1.0)
                 t["last"] = now
                 q = t["q"]
+                # Fast-path: pull small control frames (SYN/ACK/FIN/DNS etc.)
+                # out from BEHIND bulk data so handshakes never wait in line.
+                # Rebuild the deque in one pass: keep big frames, send small ones.
+                small = [b for b in q if len(b) < 100]
+                if small:
+                    big = deque(b for b in q if len(b) >= 100)
+                    t["q"].clear(); t["q"].extend(big)
+                    t["qbytes"] = sum(len(b) for b in big)
+                    for b in small:
+                        t["tokens"] -= len(b)
+                        t["bw_bytes"] += len(b)
+                        if not self._send(b): self.stats["dropped"] += 1
+                        did = True
+                        if self.stop_event.is_set(): return
                 while q and t["tokens"] >= len(q[0]):
                     b = q.popleft()
                     t["qbytes"] -= len(b)
                     t["tokens"] -= len(b)
                     t["bw_bytes"] += len(b)
-                    t["bw_last"] = now
-                    t["sent_cycles"] = t.get("sent_cycles", 0) + 1
                     if not self._send(b): self.stats["dropped"] += 1
                     did = True
                     if self.stop_event.is_set(): return
@@ -917,6 +928,11 @@ def cleanup():
 
 if __name__ == '__main__':
     import ctypes
+    if os.name == 'nt':
+        try:
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        except Exception:
+            pass
     if os.name == 'nt' and not ctypes.windll.shell32.IsUserAnAdmin():
         print("Run as Administrator."); sys.exit(1)
     elif os.name == 'posix' and os.geteuid() != 0:
