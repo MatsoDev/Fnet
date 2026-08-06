@@ -286,10 +286,13 @@ class TokenBucketForwarder:
         self._targets = {}
         self.lock = threading.Lock()
         self.thread = None
+        self.drain_thread = None
         self.stop_event = threading.Event()
         self.gateway_ip = None; self.gateway_mac = None
         self.our_mac = None; self.our_ip = None; self.interface = None
         self.sock = None
+        self.stats = {"enqueued": 0, "sent": 0, "dropped": 0, "errors": 0,
+                      "last_error": None, "sock_open": False}
 
     def configure(self, gateway_ip=None, gateway_mac=None, our_mac=None, our_ip=None, interface=None):
         with self.lock:
@@ -300,12 +303,13 @@ class TokenBucketForwarder:
             if interface is not None: self.interface = interface
 
     def set_target(self, ip, kbps, mac=None, watch=False):
+        from collections import deque
         with self.lock:
             if kbps and kbps > 0:
-                bps = (kbps * 1000) / 8.0
-                self._targets[ip] = {"kbps": kbps, "tokens": bps,
-                                     "last": time.time(), "mac": mac,
-                                     "watch": bool(watch)}
+                self._targets[ip] = {"kbps": kbps, "mac": mac,
+                                     "watch": bool(watch),
+                                     "q": deque(), "qbytes": 0,
+                                     "tokens": 0.0, "last": time.time()}
             else:
                 self._targets.pop(ip, None)
 
@@ -319,10 +323,12 @@ class TokenBucketForwarder:
 
     def start(self):
         self.stop_event.clear()
-        if self.thread and self.thread.is_alive():
-            return
-        self.thread = threading.Thread(target=self._run, args=(self.interface,), daemon=True)
-        self.thread.start()
+        if not (self.thread and self.thread.is_alive()):
+            self.thread = threading.Thread(target=self._run, args=(self.interface,), daemon=True)
+            self.thread.start()
+        if not (self.drain_thread and self.drain_thread.is_alive()):
+            self.drain_thread = threading.Thread(target=self._drain, daemon=True)
+            self.drain_thread.start()
 
     def set_stop(self):
         self.stop_event.set()
@@ -331,13 +337,75 @@ class TokenBucketForwarder:
         with self.lock:
             self._targets.clear()
 
+    def _open_sock(self):
+        if self.interface:
+            try:
+                self.sock = open_l2socket(self.interface)
+                self.stats["sock_open"] = True
+                return
+            except Exception as ex:
+                self.stats["sock_open"] = False
+                self.stats["last_error"] = repr(ex)
+        self.sock = None
+
     def _run(self, interface):
-        try:
-            self.sock = open_l2socket(interface)
-        except Exception:
-            self.sock = None
+        self._open_sock()
         sniff(iface=interface, prn=self._on_packet, store=0,
               stop_filter=lambda p: self.stop_event.is_set())
+
+    def _send(self, frame_bytes):
+        try:
+            if self.sock is None:
+                self._open_sock()
+            if self.sock is not None:
+                self.sock.send(frame_bytes)
+                self.stats["sent"] += 1
+                return True
+        except Exception as ex:
+            self.stats["errors"] += 1
+            self.stats["last_error"] = repr(ex)
+            self._open_sock()
+        return False
+
+    def _drain(self):
+        MAX_Q = 1024 * 1024  # 1 MB buffer per target allows bursts without collapse
+        while not self.stop_event.is_set():
+            now = time.time()
+            did = False
+            targets = None
+            with self.lock:
+                targets = list(self._targets.values())
+            for t in targets:
+                if t["watch"]:
+                    q = t["q"]
+                    while q:
+                        b = q.popleft()
+                        t["qbytes"] -= len(b)
+                        if not self._send(b): self.stats["dropped"] += 1
+                        if self.stop_event.is_set(): return
+                        did = True
+                    continue
+                rate = (t["kbps"] * 1000) / 8.0
+                t["tokens"] = min(t["tokens"] + (now - t["last"]) * rate, rate * 1.0)
+                t["last"] = now
+                q = t["q"]
+                while q and t["tokens"] >= len(q[0]):
+                    b = q.popleft()
+                    t["qbytes"] -= len(b)
+                    t["tokens"] -= len(b)
+                    if not self._send(b): self.stats["dropped"] += 1
+                    did = True
+                    if self.stop_event.is_set(): return
+                if t["qbytes"] > MAX_Q:
+                    excess = t["qbytes"] - MAX_Q
+                    while q and excess > 0:
+                        b = q.popleft()
+                        t["qbytes"] -= len(b)
+                        excess -= len(b)
+                        self.stats["dropped"] += 1
+                        if self.stop_event.is_set(): return
+            if not did:
+                time.sleep(0.002)
 
     def _on_packet(self, pkt):
         try:
@@ -347,7 +415,7 @@ class TokenBucketForwarder:
             if self.gateway_ip is None: return
             gw = self.gateway_ip
             src, dst = ip.src, ip.dst
-            entry = None; dev_mac = None
+            entry = None
             if src == gw:
                 entry = self._entry(dst)
             elif dst == gw and src == self.our_ip:
@@ -357,23 +425,21 @@ class TokenBucketForwarder:
             else:
                 entry = self._entry(src) or self._entry(dst) or None
             if entry is None: return
-            if not entry["watch"]:
-                now = time.time()
-                bps = (entry["kbps"] * 1000) / 8.0
-                entry["tokens"] = min(entry["tokens"] + (now - entry["last"]) * bps, bps * 2)
-                entry["last"] = now
-                if len(pkt) > entry["tokens"]: return
-                entry["tokens"] -= len(pkt)
             if src == gw:
                 out = Ether(dst=entry["mac"], src=self.our_mac) / pkt[IP]
             else:
                 out = Ether(dst=self.gateway_mac, src=self.our_mac) / pkt[IP]
-            if self.sock is not None:
-                self.sock.send(bytes(out))
-            else:
-                sendp(out, iface=self.interface, verbose=False)
-        except Exception:
-            pass
+            with self.lock:
+                entry["q"].append(bytes(out))
+                entry["qbytes"] += len(out)
+                self.stats["enqueued"] += 1
+        except Exception as ex:
+            self.stats["errors"] += 1
+
+    def report(self):
+        with self.lock:
+            return {"targets": list(self.active()),
+                    "stats": dict(self.stats)}
 
 def open_l2socket(iface):
     from scapy.config import conf
@@ -793,6 +859,10 @@ def rename():
 @app.route('/api/restore_all', methods=['POST'])
 def restore_all():
     controller.restore_all(); return jsonify({"status": "ok"})
+
+@app.route('/api/forwarder', methods=['GET'])
+def forwarder_info():
+    return jsonify(controller.forwarder.report())
 
 @app.route('/api/throttle_all', methods=['POST'])
 def throttle_all():
