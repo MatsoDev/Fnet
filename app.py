@@ -291,8 +291,8 @@ class TokenBucketForwarder:
         self.gateway_ip = None; self.gateway_mac = None
         self.our_mac = None; self.our_ip = None; self.interface = None
         self.sock = None
-        self.stats = {"enqueued": 0, "sent": 0, "dropped": 0, "errors": 0,
-                      "last_error": None, "sock_open": False}
+        self.stats = {"enqueued": 0, "sent": 0, "sent_bytes": 0, "dropped": 0,
+                      "errors": 0, "last_error": None, "sock_open": False}
 
     def configure(self, gateway_ip=None, gateway_mac=None, our_mac=None, our_ip=None, interface=None):
         with self.lock:
@@ -309,7 +309,8 @@ class TokenBucketForwarder:
                 self._targets[ip] = {"kbps": kbps, "mac": mac,
                                      "watch": bool(watch),
                                      "q": deque(), "qbytes": 0,
-                                     "tokens": 0.0, "last": time.time()}
+                                     "tokens": 0.0, "last": time.time(),
+                                     "bw_bytes": 0, "bw_last": time.time()}
             else:
                 self._targets.pop(ip, None)
 
@@ -360,6 +361,7 @@ class TokenBucketForwarder:
             if self.sock is not None:
                 self.sock.send(frame_bytes)
                 self.stats["sent"] += 1
+                self.stats["sent_bytes"] += len(frame_bytes)
                 return True
         except Exception as ex:
             self.stats["errors"] += 1
@@ -393,6 +395,8 @@ class TokenBucketForwarder:
                     b = q.popleft()
                     t["qbytes"] -= len(b)
                     t["tokens"] -= len(b)
+                    t["bw_bytes"] += len(b)
+                    t["bw_last"] = now
                     if not self._send(b): self.stats["dropped"] += 1
                     did = True
                     if self.stop_event.is_set(): return
@@ -437,12 +441,19 @@ class TokenBucketForwarder:
             self.stats["errors"] += 1
 
     def report(self):
+        now = time.time()
         with self.lock:
-            targets = {ip: {"kbps": t["kbps"], "mac": t["mac"],
-                            "watch": t["watch"],
-                            "qbytes": t["qbytes"],
-                            "queued_frames": len(t["q"])}
-                       for ip, t in self._targets.items()}
+            targets = {}
+            for ip, t in self._targets.items():
+                span = now - t["bw_last"]
+                live = round((t["bw_bytes"] * 8) / span / 1e6, 2) if span > 0 else 0.0
+                t["bw_bytes"] = 0
+                t["bw_last"] = now
+                targets[ip] = {"kbps": t["kbps"], "mac": t["mac"],
+                               "watch": t["watch"],
+                               "qbytes": t["qbytes"],
+                               "queued_frames": len(t["q"]),
+                               "live_mbps": live}
             return {"targets": targets, "stats": dict(self.stats)}
 
 def open_l2socket(iface):
