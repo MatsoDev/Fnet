@@ -64,6 +64,7 @@
   .dot-blue { background: #58a6ff; }
   .dot-red { background: #da3633; }
   .dot-gray { background: #484f58; }
+  .dot-yellow { background: #d29922; }
 
   .sort-group { display: flex; gap: 6px; align-items: center; margin-left: auto; }
   .sort-group label { font-size: 12px; color: #8b949e; }
@@ -82,6 +83,28 @@
   .box-blue { background: #58a6ff44; color: #58a6ff; border: 1px solid #58a6ff55; }
   .box-red { background: #da363344; color: #da3633; border: 1px solid #da363355; }
   .box-gray { background: #484f5844; color: #8b949e; border: 1px solid #484f5855; }
+  .box-yellow { background: #d2992244; color: #d29922; border: 1px solid #d2992255; }
+
+  .throttle-ctl {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    flex-shrink: 0; min-width: 110px;
+  }
+  .throttle-label { font-size: 10px; color: #8b949e; white-space: nowrap; }
+  .throttle-label b { color: #d29922; }
+  .throttle-slider {
+    -webkit-appearance: none; appearance: none;
+    width: 110px; height: 4px; border-radius: 2px;
+    background: #30363d; outline: none; cursor: pointer;
+  }
+  .throttle-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #d29922; border: none; cursor: pointer;
+  }
+  .throttle-slider::-moz-range-thumb {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #d29922; border: none; cursor: pointer;
+  }
 
   .device-card {
     display: flex; align-items: center; gap: 10px;
@@ -89,6 +112,7 @@
     border-radius: 8px; margin-bottom: 5px; transition: border-color .2s;
   }
   .device-card.disconnected { border-color: #da3633; background: #1c1010; }
+  .device-card.throttled { border-color: #d29922; background: #1c160d; }
   .device-card.router { border-color: #3fb950; background: #0d1f0d; }
   .device-card.offline { border-color: #30363d; opacity: .65; }
 
@@ -97,6 +121,7 @@
     background: #3fb950;
   }
   .device-card.disconnected .device-status { background: #da3633; }
+  .device-card.throttled .device-status { background: #d29922; }
   .device-card.router .device-status { background: #3fb950; }
   .device-card.offline .device-status { background: #484f58; }
 
@@ -117,6 +142,7 @@
     display: inline-block; line-height: 14px;
   }
   .badge-cut { background: #da363333; color: #f85149; }
+  .badge-throttle { background: #d2992233; color: #d29922; }
   .badge-offline { background: #484f5822; color: #8b949e; }
 
   .device-traffic {
@@ -194,6 +220,7 @@
 
   <div class="legend">
     <span class="legend-item"><span class="box box-green">&#10003;</span> On</span>
+    <span class="legend-item"><span class="box box-yellow">~</span> Throttled</span>
     <span class="legend-item"><span class="box box-red">X</span> Blocked</span>
     <span class="legend-item"><span class="box box-gray">?</span> Offline</span>
   </div>
@@ -201,6 +228,7 @@
   <div class="stats-bar">
     <span>Total: <strong id="totalCount">0</strong></span>
     <span><span class="dot dot-green"></span><strong id="connectedCount">0</strong></span>
+    <span><span class="dot dot-yellow"></span><strong id="throttledCount">0</strong></span>
     <span><span class="dot dot-red"></span><strong id="disconnectedCount">0</strong></span>
     <span><span class="dot dot-gray"></span><strong id="offlineCount">0</strong></span>
   </div>
@@ -290,6 +318,13 @@ async function toggleDevice(mac) {
   loadDevices();
 }
 
+async function setThrottle(mac, kbps) {
+  const d = await api('/api/throttle', { method: 'POST', body: JSON.stringify({ mac, kbps: parseInt(kbps) }) });
+  if (!d.success) { toast(d.state, 'error'); loadDevices(); return; }
+  toast(d.state);
+  loadDevices();
+}
+
 function renameDevice(mac, input, oldName) {
   const name = input.value.trim();
   if (name === oldName) return;
@@ -330,25 +365,29 @@ function render(devices) {
   else if (sortBy === 'name') sorted.sort((a,b) => (a.display_name||'').localeCompare(b.display_name||''));
   else sorted.sort((a,b) => a.ip.localeCompare(b.ip, undefined, {numeric:true}));
 
-  let t=0, c=0, d=0, o=0;
+  let t=0, c=0, d=0, o=0, th=0;
   list.innerHTML = sorted.map(dev => {
     t++;
     const isRouter = dev.state.startsWith('Router');
     const isOff = dev.state === 'Disconnected';
     const isOffline = dev.state === 'Offline';
-    if (isRouter || (!isOff && !isOffline)) c++;
+    const isThr = dev.state === 'Throttled';
+    if (isThr) th++;
+    if (isRouter || (!isOff && !isOffline && !isThr)) c++;
     else if (isOff) d++;
-    else o++;
+    else if (!isThr) o++;
 
     const name = dev.custom_name || dev.display_name;
     const bw = Math.min(dev.traffic_kb / 10, 100);
+    const thrKbps = dev.throttle_kbps || 0;
 
-    return `<div class="device-card${isOff ? ' disconnected' : ''}${isRouter ? ' router' : ''}${isOffline ? ' offline' : ''}">
+    return `<div class="device-card${isOff ? ' disconnected' : ''}${isThr ? ' throttled' : ''}${isRouter ? ' router' : ''}${isOffline ? ' offline' : ''}">
       <div class="device-status"></div>
       <div class="device-info">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <div class="device-name" onclick="startRename(this,'${dev.mac}','${esc(name)}')" title="Click to rename">${esc(name)}</div>
           ${isOff ? '<span class="device-badge badge-cut">BLOCKED</span>' : ''}
+          ${isThr ? `<span class="device-badge badge-throttle">LIMIT ${thrKbps} Kbps</span>` : ''}
           ${isOffline ? '<span class="device-badge badge-offline">OFFLINE</span>' : ''}
         </div>
         <div class="device-meta">
@@ -363,6 +402,14 @@ function render(devices) {
       </div>
       <div class="device-actions">
         ${isRouter ? '<span style="font-size:11px;color:#3fb950">Gateway</span>' : `
+          ${isOffline ? '' : `
+          <div class="throttle-ctl">
+            <span class="throttle-label">Limit <b>${thrKbps ? thrKbps + ' kbps' : 'Off'}</b></span>
+            <input type="range" class="throttle-slider" min="0" max="1000" step="10" value="${thrKbps}"
+              oninput="this.closest('.device-card').querySelector('.throttle-label b').textContent = (this.value ? this.value + ' kbps' : 'Off')"
+              onchange="setThrottle('${dev.mac}', this.value)" title="Throttle speed">
+          </div>
+          `}
           <button class="toggle-btn ${isOff?'off':'on'}" onclick="toggleDevice('${dev.mac}')" title="${isOff?'Restore':'Block'}"></button>
         `}
       </div>
@@ -371,6 +418,7 @@ function render(devices) {
 
   document.getElementById('totalCount').textContent = t;
   document.getElementById('connectedCount').textContent = c;
+  document.getElementById('throttledCount').textContent = th;
   document.getElementById('disconnectedCount').textContent = d;
   document.getElementById('offlineCount').textContent = o;
 }

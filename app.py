@@ -78,13 +78,14 @@ class TokenBucketForwarder:
         self.thread = None
         self.stop_event = threading.Event()
         self.gateway_ip = None; self.gateway_mac = None
-        self.our_mac = None; self.interface = None
+        self.our_mac = None; self.our_ip = None; self.interface = None
 
-    def configure(self, gateway_ip=None, gateway_mac=None, our_mac=None, interface=None):
+    def configure(self, gateway_ip=None, gateway_mac=None, our_mac=None, our_ip=None, interface=None):
         with self.lock:
             if gateway_ip is not None: self.gateway_ip = gateway_ip
             if gateway_mac is not None: self.gateway_mac = gateway_mac
             if our_mac is not None: self.our_mac = our_mac
+            if our_ip is not None: self.our_ip = our_ip
             if interface is not None: self.interface = interface
 
     def set_target(self, ip, kbps, mac=None):
@@ -229,7 +230,7 @@ class NetCutController:
         self.interface, self.ip, _, self._iface_idx = sel
         self.our_mac = get_if_hwaddr(self.interface)
         self.our_ip = self.ip
-        self.forwarder.configure(interface=self.interface, gateway_ip=gw, our_mac=self.our_mac)
+        self.forwarder.configure(interface=self.interface, gateway_ip=gw, our_mac=self.our_mac, our_ip=self.ip)
         if not gw: return None, "No default gateway."
         self.gateway_ip = gw
         return True, None
