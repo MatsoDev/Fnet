@@ -92,6 +92,35 @@
     border-radius: 2px; transition: width .4s;
   }
 
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(1,4,9,.7);
+    display: none; align-items: flex-start; justify-content: center;
+    padding: 6vh 16px 16px; z-index: 900; overflow-y: auto;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 10px;
+    width: 100%; max-width: 720px; max-height: 80vh; display: flex;
+    flex-direction: column;
+  }
+  .modal-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 18px; border-bottom: 1px solid #30363d; gap: 10px;
+  }
+  .modal-head h3 { color: #d29922; font-size: 16px; }
+  .modal-body { padding: 12px 18px; overflow-y: auto; }
+  .watch-device { margin-bottom: 10px; }
+  .watch-device:not(:last-child) { padding-bottom: 10px; border-bottom: 1px solid #21262d; }
+  .watch-device-title { font-size: 13px; font-weight: 600; color: #c9d1d9; margin-bottom: 4px; }
+  .watch-device-title span { color: #8b949e; font-weight: 400; font-size: 11px; }
+  .domain-row {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; padding: 3px 8px; border-radius: 4px; color: #58a6ff;
+  }
+  .domain-row:hover { background: #161b22; }
+  .domain-row .cnt { color: #8b949e; font-size: 11px; }
+  .watch-empty { color: #8b949e; text-align: center; padding: 30px 0; }
+
   .sort-group { display: flex; gap: 6px; align-items: center; margin-left: auto; }
   .sort-group label { font-size: 12px; color: #8b949e; }
   .sort-btn { font-size: 12px; padding: 3px 10px; border-radius: 4px; background: #161b22; color: #8b949e; }
@@ -237,6 +266,7 @@
     <button class="btn btn-primary" onclick="scanNetwork()" id="scanBtn"> Scan</button>
     <button class="btn btn-danger" onclick="restoreAll()" id="restoreBtn"> Restore All</button>
     <button class="btn" onclick="throttleAll()"> Throttle All</button>
+    <button class="btn" onclick="openWatch()" style="border-color:#d29922;color:#d29922"> Watch Traffic</button>
     <div class="sort-group">
       <label>Sort:</label>
       <button class="btn btn-sm sort-btn active" data-sort="ip" onclick="setSort('ip')">IP</button>
@@ -272,6 +302,27 @@
   </div>
 
   <div id="deviceList"></div>
+</div>
+
+<div class="modal-overlay" id="watchOverlay" onclick="if(event.target===this)closeWatch()">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Traffic Watch</h3>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="watchRange" class="quota-num" style="width:auto" onchange="loadWatch()">
+          <option value="1">Last 60s</option>
+          <option value="5" selected>Last 5 min</option>
+          <option value="30">Last 30 min</option>
+          <option value="0">All time</option>
+        </select>
+        <button class="btn btn-sm" onclick="loadWatch()">Refresh</button>
+        <button class="btn btn-sm" onclick="closeWatch()">&times;</button>
+      </div>
+    </div>
+    <div id="watchBody" class="modal-body">
+      <p style="color:#8b949e;font-size:13px">Watching...</p>
+    </div>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -408,6 +459,56 @@ async function resetQuota() {
   loadQuota();
 }
 
+let watchTimer = null;
+function openWatch() {
+  document.getElementById('watchOverlay').classList.add('open');
+  loadWatch();
+  watchTimer = setInterval(loadWatch, 3000);
+}
+function closeWatch() {
+  document.getElementById('watchOverlay').classList.remove('open');
+  if (watchTimer) { clearInterval(watchTimer); watchTimer = null; }
+}
+
+async function loadWatch() {
+  try {
+    const minutes = parseInt(document.getElementById('watchRange').value) || 0;
+    const data = await api('/api/domains?minutes=' + minutes);
+    const body = document.getElementById('watchBody');
+    const ips = Object.keys(data);
+    if (!ips.length) {
+      body.innerHTML = '<div class="watch-empty">No domains seen yet. Open a website on the network to see activity.</div>';
+      return;
+    }
+    body.innerHTML = ips.map(ip => {
+      const doms = Object.entries(data[ip]).sort((a,b) => b[1].last - a[1].last);
+      const devName = deviceName(ip);
+      return `<div class="watch-device">
+        <div class="watch-device-title">${esc(devName)} <span>| ${ip} | ${doms.length} domain(s)</span></div>
+        ${doms.map(([d, v]) => `<div class="domain-row"><span>${esc(d)}</span><span class="cnt">${v.count} \u00b7 ${ago(v.last)}</span></div>`).join('')}
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+function deviceName(ip) {
+  const list = document.getElementById('deviceList').querySelectorAll('.device-card');
+  for (const card of list) {
+    const meta = card.querySelector('.device-meta');
+    if (meta && meta.textContent.includes(ip)) {
+      const n = card.querySelector('.device-name');
+      return n ? n.textContent : ip;
+    }
+  }
+  return ip;
+}
+function ago(ts) {
+  const s = Math.max(1, Math.round((Date.now()/1000 - ts)));
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.round(s/60) + 'm ago';
+  return Math.round(s/3600) + 'h ago';
+}
+
 function renameDevice(mac, input, oldName) {
   const name = input.value.trim();
   if (name === oldName) return;
@@ -440,6 +541,11 @@ function startRename(span, mac, currentName) {
 
 function fmt(kb) { return kb < 1024 ? kb.toFixed(1) : (kb/1024).toFixed(1); }
 function unit(kb) { return kb < 1024 ? 'KB' : 'MB'; }
+function fmtSpeed(kbps) {
+  if (!kbps) return 'Off';
+  if (kbps >= 1000) return (kbps/1000).toFixed(kbps % 1000 ? 2 : 0) + ' Mbps';
+  return kbps + ' kbps';
+}
 
 function render(devices) {
   const list = document.getElementById('deviceList');
@@ -470,7 +576,7 @@ function render(devices) {
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <div class="device-name" onclick="startRename(this,'${dev.mac}','${esc(name)}')" title="Click to rename">${esc(name)}</div>
           ${isOff ? '<span class="device-badge badge-cut">BLOCKED</span>' : ''}
-          ${isThr ? `<span class="device-badge badge-throttle">LIMIT ${thrKbps} Kbps</span>` : ''}
+          ${isThr ? `<span class="device-badge badge-throttle">LIMIT ${fmtSpeed(thrKbps)}</span>` : ''}
           ${isOffline ? '<span class="device-badge badge-offline">OFFLINE</span>' : ''}
         </div>
         <div class="device-meta">
@@ -487,10 +593,10 @@ function render(devices) {
         ${isRouter ? '<span style="font-size:11px;color:#3fb950">Gateway</span>' : `
           ${isOffline ? '' : `
           <div class="throttle-ctl">
-            <span class="throttle-label">Limit <b>${thrKbps ? thrKbps + ' kbps' : 'Off'}</b></span>
-            <input type="range" class="throttle-slider" min="0" max="1000" step="10" value="${thrKbps}"
-              oninput="this.closest('.device-card').querySelector('.throttle-label b').textContent = (this.value ? this.value + ' kbps' : 'Off')"
-              onchange="setThrottle('${dev.mac}', this.value)" title="Throttle speed">
+            <span class="throttle-label">Limit <b>${thrKbps ? fmtSpeed(thrKbps) : 'Off'}</b></span>
+            <input type="range" class="throttle-slider" min="0" max="30000" step="100" value="${thrKbps}"
+              oninput="this.closest('.device-card').querySelector('.throttle-label b').textContent = (this.value ? fmtSpeed(this.value) : 'Off')"
+              onchange="setThrottle('${dev.mac}', this.value)" title="Throttle speed (0 - 30 Mbps)">
           </div>
           `}
           <button class="toggle-btn ${isOff?'off':'on'}" onclick="toggleDevice('${dev.mac}')" title="${isOff?'Restore':'Block'}"></button>

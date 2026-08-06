@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, time, signal, threading, socket, subprocess, re, urllib.request
+import os, sys, json, time, signal, threading, socket, subprocess, re, urllib.request, struct
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from collections import defaultdict
@@ -70,6 +70,131 @@ class TrafficMonitor:
     def total_bytes(self):
         with self.lock:
             return sum(self.traffic.values())
+
+class DomainWatcher:
+    """Passive watcher that records which domains each device visits.
+
+    Uses three signals visible on the local segment:
+      - TLS ClientHello SNI (dst port 443)
+      - DNS queries (port 53)
+      - HTTP request Host header (dst port 80)
+    Notice: this relies on the traffic crossing our NIC (normal for any
+    ARP-inspecting client on the same segment / when MITM is active).
+    """
+    MAX_PER_IP = 60
+    WINDOW = 60 * 60  # forget domains idle for > 1 hour
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.domains = defaultdict(dict)  # ip -> {domain: {count, last}}
+
+    def _parse_sni(self, data):
+        try:
+            if data[0] != 0x16: return None
+            if data[5] != 0x01: return None
+            pos = 5 + 4      # skip handshake type+len
+            pos += 2         # TLS version
+            pos += 32        # random
+            sid_len = data[pos]; pos += 1 + sid_len
+            cs_len = int.from_bytes(data[pos:pos+2], 'big'); pos += 2 + cs_len
+            cm_len = data[pos]; pos += 1 + cm_len
+            ext_total = int.from_bytes(data[pos:pos+2], 'big'); pos += 2
+            end = pos + ext_total
+            while pos + 4 <= end:
+                etype = int.from_bytes(data[pos:pos+2], 'big')
+                elen = int.from_bytes(data[pos+2:pos+4], 'big')
+                pos += 4
+                if etype == 0:  # server_name
+                    npos = pos + 2
+                    while npos + 3 < pos + elen:
+                        ntype = data[npos]; nlen = int.from_bytes(data[npos+1:npos+3], 'big'); npos += 3
+                        if ntype == 0:
+                            name = data[npos:npos+nlen].decode('utf-8', 'ignore')
+                            return name
+                        npos += nlen
+                    return None
+                pos += elen
+        except Exception:
+            return None
+        return None
+
+    def sniff_http_host(self, data):
+        try:
+            z = data.split(b"\r\n")
+            if not z: return None
+            if not (z[0].startswith(b"GET ") or z[0].startswith(b"POST ") or
+                    z[0].startswith(b"HEAD ") or z[0].startswith(b"PUT ") or
+                    z[0].startswith(b"DELETE ")):
+                return None
+            for line in z[1:]:
+                if line.lower().startswith(b"host:"):
+                    host = line[5:].strip().decode('utf-8', 'ignore')
+                    return host.split(':')[0] if ':' in host else host
+        except Exception:
+            return None
+        return None
+
+    def record(self, ip, domain):
+        if not domain or len(domain) > 253: return
+        now = time.time()
+        with self.lock:
+            d = self.domains[ip]
+            if domain in d:
+                d[domain]["count"] += 1
+                d[domain]["last"] = now
+            else:
+                if len(d) >= self.MAX_PER_IP:
+                    oldest = min(d.items(), key=lambda kv: kv[1]["last"])
+                    del d[oldest[0]]
+                d[domain] = {"count": 1, "last": now}
+
+    def packet_handler(self, pkt):
+        try:
+            if IP not in pkt: return
+            ip = pkt[IP]
+            if TCP in pkt:
+                tcp = pkt[TCP]
+                if Raw in tcp:
+                    raw = bytes(tcp[Raw].load)
+                    if tcp.dport == 443 and raw:
+                        d = self._parse_sni(raw)
+                        if d: self.record(ip.src, d)
+                    elif tcp.dport == 80 and raw:
+                        h = self.sniff_http_host(raw)
+                        if h: self.record(ip.src, h)
+            if DNS in pkt and pkt[DNS].qd:
+                try:
+                    name = pkt[DNS].qd.qname.decode('utf-8', 'ignore').rstrip('.')
+                except Exception:
+                    name = None
+                if name: self.record(ip.src, name)
+        except Exception:
+            pass
+
+    def start(self, interface):
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._run, args=(interface,), daemon=True)
+        self.thread.start()
+
+    def _run(self, interface):
+        sniff(iface=interface, prn=self.packet_handler, store=0,
+              stop_filter=lambda p: self.stop_event.is_set())
+
+    def set_stop(self):
+        self.stop_event.set()
+
+    def get_domains(self, since=None):
+        now = time.time()
+        with self.lock:
+            out = {}
+            for ip, doms in self.domains.items():
+                keep = {d: v for d, v in doms.items()
+                        if not since or v["last"] >= since}
+                keep = {d: v for d, v in keep.items() if now - v["last"] < self.WINDOW}
+                if keep: out[ip] = keep
+            return out
 
 class QuotaTracker:
     """Monthly internet quota tracking + auto-throttle / auto-block.
@@ -242,6 +367,7 @@ class NetCutController:
         self.scanning = False; self.scan_progress = 0
         self.traffic = TrafficMonitor()
         self.forwarder = TokenBucketForwarder()
+        self.watcher = DomainWatcher()
         self.quota = QuotaTracker()
         self.quota.load(self.saved_data.get('quota'))
         self._last_traffic_total = 0
@@ -366,6 +492,7 @@ class NetCutController:
         self.devices.sort(key=lambda x: x.ip)
         self.scan_progress = 100
         self.traffic.stop(); self.traffic.start(self.interface)
+        self.watcher.set_stop(); self.watcher.start(self.interface)
         self.forwarder.start()
         self.scanning = False
         return self.devices
@@ -544,6 +671,7 @@ class NetCutController:
     def restore_all(self):
         self.traffic.stop()
         self.forwarder.set_stop(); self.forwarder.clear()
+        self.watcher.set_stop()
         if self.auto_scan_thread: self.auto_scan_stop.set()
         for d in self.devices:
             self._stop_spoof(d); self._restore(d)
@@ -621,6 +749,11 @@ def throttle_all():
 @app.route('/api/quota', methods=['GET'])
 def quota_get():
     return jsonify(controller.quota_info())
+
+@app.route('/api/domains', methods=['GET'])
+def domains_get():
+    since = time.time() - int(request.args.get('minutes', 5) or 5) * 60
+    return jsonify(controller.watcher.get_domains(since=since))
 
 @app.route('/api/quota', methods=['POST'])
 def quota_set():

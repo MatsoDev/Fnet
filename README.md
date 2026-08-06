@@ -17,10 +17,16 @@ An interactive network management, auditing, and **bandwidth control** tool writ
 * **Graceful Restoration** — Restores all ARP tables on exit, so nothing stays cut off.
 
 ### Throttling (Real Bandwidth Shaping)
-* **Per-Device Speed Control** — Drag a slider on any device card to cap its internet speed (0–1000 kbps).
+* **Per-Device Speed Control** — Drag a slider on any device card to cap its internet speed from **0 up to 30 Mbps** (router-speed default).
 * **Real MITM Rate Limiting** — `TokenBucketForwarder` ARPs-poison the target so its traffic crosses your NIC, then applies a token bucket to the relayed frames — dropping what exceeds your configured bit-rate. WhatsApp/text keeps working; heavy video throttles down.
 * **Throttle All** — One-click apply a limit to every device at once.
 * **Persistent state** — Limits survive rescans (stored in `devices.json`).
+
+### Traffic Watch
+Watch which websites each device is visiting, live:
+* Pulled from **TLS SNI** (HTTPS), **DNS queries**, and **HTTP `Host` headers** — no decryption needed.
+* Per-device domain list with hit counts and last-seen timestamps.
+* **Watch Traffic** modal with 60s / 5min / 30min / all-time ranges.
 
 ### Quota Auto-Mode
 Save your router's monthly internet allowance automatically:
