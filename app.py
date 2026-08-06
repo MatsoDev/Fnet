@@ -302,7 +302,8 @@ class TokenBucketForwarder:
                                      "q": deque(), "cq": deque(),
                                      "qbytes": 0, "cbytes": 0,
                                      "tokens": 0.0, "last": time.time(),
-                                     "bw_bytes": 0, "bw_last": time.time()}
+                                     "bw_bytes": 0, "bw_last": time.time(),
+                                     "down": 0, "up": 0}
             else:
                 self._targets.pop(ip, None)
 
@@ -437,8 +438,10 @@ class TokenBucketForwarder:
             if entry is None: return
             if src == gw:
                 out = Ether(dst=entry["mac"], src=self.our_mac) / pkt[IP]
+                entry["down"] += 1
             else:
                 out = Ether(dst=self.gateway_mac, src=self.our_mac) / pkt[IP]
+                entry["up"] += 1
             with self.lock:
                 out_b = bytes(out)
                 if len(out_b) < 100:
@@ -465,6 +468,8 @@ class TokenBucketForwarder:
                                "qbytes": t["qbytes"] + t["cbytes"],
                                "queued_frames": len(t["q"]) + len(t["cq"]),
                                "control_queued": len(t["cq"]),
+                               "down_frames": t["down"],
+                               "up_frames": t["up"],
                                "live_mbps": live}
             return {"targets": targets, "stats": dict(self.stats)}
 
