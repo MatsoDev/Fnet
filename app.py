@@ -438,7 +438,7 @@ class TokenBucketForwarder:
 
     def report(self):
         with self.lock:
-            return {"targets": list(self.active()),
+            return {"targets": dict(self._targets),
                     "stats": dict(self.stats)}
 
 def open_l2socket(iface):
@@ -911,4 +911,4 @@ if __name__ == '__main__':
     controller.start_auto_scan()
     print(f"Found {len(controller.devices)} device(s). Web UI: http://0.0.0.0:5000")
     signal.signal(signal.SIGINT, lambda s, f: (cleanup(), os._exit(0)))
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
