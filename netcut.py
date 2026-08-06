@@ -57,46 +57,54 @@ class NetCutController:
 
     def check_root(self):
         """Step 1: Initialization & Privilege Check"""
-        if os.geteuid() != 0:
-            print(f"{Colors.RED}Error: This script must be run as root. Use 'sudo'.{Colors.RESET}")
-            sys.exit(1)
+        if os.name == 'posix':
+            if os.geteuid() != 0:
+                print(f"{Colors.RED}Error: This script must be run as root. Use 'sudo'.{Colors.RESET}")
+                sys.exit(1)
+        else:
+            import ctypes
+            if not ctypes.windll.shell32.IsUserAnAdmin():
+                print(f"{Colors.RED}Error: This script must be run as Administrator.{Colors.RESET}")
+                sys.exit(1)
         print(f"{Colors.GREEN}✓ Root privileges confirmed.{Colors.RESET}")
 
     def discover_interfaces(self):
         """Step 2: Interface Discovery & Selection"""
         try:
-            interfaces = netifaces.interfaces()
-            available_interfaces = [i for i in interfaces if i != 'lo' and 'docker' not in i]
-           
-            if not available_interfaces:
+            from scapy.arch.windows import get_windows_if_list
+            iface_list = get_windows_if_list()
+            available = []
+            for iface in iface_list:
+                name = iface.get('name', '')
+                ips = [ip for ip in iface.get('ips', []) if '.' in ip and not ip.startswith('169.254')]
+                desc = iface.get('description', '')
+                if ips and name and not any(x in desc for x in ['WAN Miniport', 'Kernel Debug', 'VPN', 'Loopback', 'Teredo', '6to4', 'IP-HTTPS']):
+                    clean_name = name.replace('\u200f', '').strip()
+                    available.append((name, clean_name, ips[0], desc))
+
+            if not available:
                 print(f"{Colors.RED}Error: No usable network interfaces found.{Colors.RESET}")
                 sys.exit(1)
             print(f"\n{Colors.BOLD}Step 2: Select Network Interface{Colors.RESET}")
-            for i, iface in enumerate(available_interfaces):
-                print(f" {i + 1}. {Colors.CYAN}{iface}{Colors.RESET}")
+            for i, (orig, clean, ip, desc) in enumerate(available):
+                print(f" {i + 1}. {Colors.CYAN}{clean}{Colors.RESET} ({ip}) - {desc}")
             while True:
                 try:
                     choice = int(input(f"\n{Colors.YELLOW}Enter interface number to use: {Colors.RESET}")) - 1
-                    if 0 <= choice < len(available_interfaces):
-                        self.interface = available_interfaces[choice]
+                    if 0 <= choice < len(available):
+                        self.interface = available[choice][0]
+                        self.ip = available[choice][2]
                         break
                     else:
                         print(f"{Colors.RED}Invalid number. Please try again.{Colors.RESET}")
                 except ValueError:
                     print(f"{Colors.RED}Invalid input. Please enter a number.{Colors.RESET}")
-            # Get IP and Gateway for the chosen interface
-            addrs = netifaces.ifaddresses(self.interface)
-            if netifaces.AF_INET not in addrs:
-                print(f"{Colors.RED}Error: Interface {self.interface} has no IPv4 address.{Colors.RESET}")
-                sys.exit(1)
-           
-            self.ip = addrs[netifaces.AF_INET][0]['addr']
-           
+
             gateways = netifaces.gateways()
             if 'default' not in gateways or netifaces.AF_INET not in gateways['default']:
                 print(f"{Colors.RED}Error: Could not find default gateway.{Colors.RESET}")
                 sys.exit(1)
-           
+            
             self.gateway_ip = gateways['default'][netifaces.AF_INET][0]
             print(f"{Colors.GREEN}✓ Interface selected: {self.interface} ({self.ip}) | Gateway: {self.gateway_ip}{Colors.RESET}")
         except Exception as e:

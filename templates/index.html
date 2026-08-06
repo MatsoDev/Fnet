@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetCut Pro</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0d1117; color: #c9d1d9; min-height: 100vh;
+  }
+  .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
+
+  header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 0; border-bottom: 1px solid #30363d; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;
+  }
+  header h1 { font-size: 22px; font-weight: 700; color: #58a6ff; }
+  header .info { font-size: 13px; color: #8b949e; }
+  header .info span { color: #c9d1d9; }
+
+  .toolbar { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  .btn {
+    padding: 8px 18px; border: 1px solid #30363d; border-radius: 6px;
+    background: #21262d; color: #c9d1d9; cursor: pointer; font-size: 14px;
+    transition: background .2s; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:hover { background: #30363d; }
+  .btn-primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  .btn-primary:hover { background: #388bfd; }
+  .btn-danger { background: #da3633; border-color: #da3633; color: #fff; }
+  .btn-danger:hover { background: #f85149; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-sm { padding: 4px 12px; font-size: 12px; }
+
+  .scan-bar-wrap {
+    height: 4px; background: #21262d; border-radius: 2px; margin-bottom: 12px; overflow: hidden; display: none;
+  }
+  .scan-bar-wrap.active { display: block; }
+  .scan-bar-fill {
+    height: 100%; background: linear-gradient(90deg, #1f6feb, #58a6ff);
+    border-radius: 2px; transition: width .4s ease; width: 0%;
+  }
+  .scan-bar-fill.indeterminate {
+    width: 30%; animation: scanPulse 1.5s ease infinite;
+  }
+  @keyframes scanPulse {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+  }
+
+  .stats-bar {
+    display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; flex-wrap: wrap;
+    align-items: center;
+  }
+  .stats-bar span { color: #8b949e; }
+  .stats-bar strong { color: #c9d1d9; }
+  .stats-bar .dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 3px; vertical-align: middle;
+  }
+  .dot-green { background: #3fb950; }
+  .dot-blue { background: #58a6ff; }
+  .dot-red { background: #da3633; }
+  .dot-gray { background: #484f58; }
+
+  .sort-group { display: flex; gap: 6px; align-items: center; margin-left: auto; }
+  .sort-group label { font-size: 12px; color: #8b949e; }
+  .sort-btn { font-size: 12px; padding: 3px 10px; border-radius: 4px; background: #161b22; color: #8b949e; }
+  .sort-btn.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+
+  .legend {
+    display: flex; gap: 16px; font-size: 12px; color: #8b949e; margin-bottom: 8px; flex-wrap: wrap;
+  }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-item .box {
+    display: inline-block; width: 14px; height: 14px; border-radius: 3px;
+    text-align: center; line-height: 14px; font-size: 8px; font-weight: 700;
+  }
+  .box-green { background: #3fb95044; color: #3fb950; border: 1px solid #3fb95055; }
+  .box-blue { background: #58a6ff44; color: #58a6ff; border: 1px solid #58a6ff55; }
+  .box-red { background: #da363344; color: #da3633; border: 1px solid #da363355; }
+  .box-gray { background: #484f5844; color: #8b949e; border: 1px solid #484f5855; }
+
+  .device-card {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; margin-bottom: 5px; transition: border-color .2s;
+  }
+  .device-card.disconnected { border-color: #da3633; background: #1c1010; }
+  .device-card.router { border-color: #3fb950; background: #0d1f0d; }
+  .device-card.offline { border-color: #30363d; opacity: .65; }
+
+  .device-status {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    background: #3fb950;
+  }
+  .device-card.disconnected .device-status { background: #da3633; }
+  .device-card.router .device-status { background: #3fb950; }
+  .device-card.offline .device-status { background: #484f58; }
+
+  .device-info { flex: 1; min-width: 0; }
+  .device-name {
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .device-name:hover { color: #58a6ff; }
+  .device-name-input {
+    font-size: 14px; font-weight: 600; background: #0d1117; color: #c9d1d9;
+    border: 1px solid #58a6ff; border-radius: 4px; padding: 2px 6px; width: 180px; outline: none;
+  }
+  .device-meta { font-size: 11px; color: #8b949e; margin-top: 1px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .device-badge {
+    font-size: 9px; padding: 1px 6px; border-radius: 8px;
+    background: #21262d; text-transform: uppercase; letter-spacing: .3px;
+    display: inline-block; line-height: 14px;
+  }
+  .badge-cut { background: #da363333; color: #f85149; }
+  .badge-offline { background: #484f5822; color: #8b949e; }
+
+  .device-traffic {
+    font-size: 11px; color: #58a6ff; flex-shrink: 0;
+    min-width: 70px; text-align: right;
+  }
+  .device-traffic .num { font-weight: 600; font-size: 13px; }
+  .device-traffic .label { font-size: 9px; color: #8b949e; }
+  .traffic-bar {
+    width: 55px; height: 3px; background: #21262d; border-radius: 2px;
+    margin-top: 2px; margin-left: auto; overflow: hidden;
+  }
+  .traffic-bar-fill { height: 100%; background: #58a6ff; border-radius: 2px; transition: width .5s; }
+
+  .device-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+  .toggle-btn {
+    width: 38px; height: 22px; border-radius: 11px; border: none;
+    cursor: pointer; position: relative; transition: background .2s; flex-shrink: 0;
+  }
+  .toggle-btn.on { background: #3fb950; }
+  .toggle-btn.off { background: #da3633; }
+  .toggle-btn::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 18px; height: 18px; border-radius: 50%; background: #fff;
+    transition: transform .2s;
+  }
+  .toggle-btn.off::after { transform: translateX(16px); }
+  .toggle-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    padding: 10px 24px; border-radius: 8px; font-size: 14px; z-index: 999;
+    opacity: 0; transition: opacity .3s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+  .toast.success { background: #1c3a1c; border: 1px solid #3fb950; color: #7ee787; }
+  .toast.error { background: #3a1c1c; border: 1px solid #da3633; color: #f85149; }
+
+  @media (max-width: 600px) {
+    .device-card { flex-wrap: wrap; gap: 6px; }
+    .device-actions { width: 100%; justify-content: flex-end; }
+    .device-traffic { min-width: auto; }
+    header { flex-direction: column; align-items: flex-start; }
+    .sort-group { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>NetCut Pro</h1>
+      <div class="info" id="headerInfo">Loading...</div>
+    </div>
+    <div class="info" style="font-size:12px;display:flex;gap:10px;align-items:center">
+      <span id="autoBadge" style="color:#484f58">Auto: off</span>
+      <span id="lastScan">Never</span>
+    </div>
+  </header>
+
+  <div class="scan-bar-wrap" id="scanBarWrap">
+    <div class="scan-bar-fill" id="scanBarFill"></div>
+  </div>
+
+  <div class="toolbar">
+    <button class="btn btn-primary" onclick="scanNetwork()" id="scanBtn"> Scan</button>
+    <button class="btn btn-danger" onclick="restoreAll()" id="restoreBtn"> Restore All</button>
+    <div class="sort-group">
+      <label>Sort:</label>
+      <button class="btn btn-sm sort-btn active" data-sort="ip" onclick="setSort('ip')">IP</button>
+      <button class="btn btn-sm sort-btn" data-sort="traffic" onclick="setSort('traffic')">Traffic</button>
+      <button class="btn btn-sm sort-btn" data-sort="name" onclick="setSort('name')">Name</button>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span class="legend-item"><span class="box box-green">&#10003;</span> On</span>
+    <span class="legend-item"><span class="box box-red">X</span> Blocked</span>
+    <span class="legend-item"><span class="box box-gray">?</span> Offline</span>
+  </div>
+
+  <div class="stats-bar">
+    <span>Total: <strong id="totalCount">0</strong></span>
+    <span><span class="dot dot-green"></span><strong id="connectedCount">0</strong></span>
+    <span><span class="dot dot-red"></span><strong id="disconnectedCount">0</strong></span>
+    <span><span class="dot dot-gray"></span><strong id="offlineCount">0</strong></span>
+  </div>
+
+  <div id="deviceList"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+let sortBy = 'ip';
+
+async function api(url, opts) {
+  const res = await fetch(url, {
+    headers: { 'Content-Type': 'application/json' },
+    ...(opts || {})
+  });
+  return res.json();
+}
+
+function toast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast ' + (type||'success') + ' show';
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+async function loadInfo() {
+  try {
+    const info = await api('/api/info');
+    if (info.interface) {
+      document.getElementById('headerInfo').textContent =
+        info.interface.replace(/\u200f/g,'') + ' \u00b7 ' + info.ip + ' \u2192 Gateway: ' + info.gateway;
+    }
+    document.getElementById('autoBadge').textContent = 'Auto: on';
+    document.getElementById('autoBadge').style.color = '#3fb950';
+    const wrap = document.getElementById('scanBarWrap');
+    const fill = document.getElementById('scanBarFill');
+    if (info.scanning) {
+      wrap.classList.add('active');
+      if (info.scan_progress > 0 && info.scan_progress < 100) {
+        fill.className = 'scan-bar-fill';
+        fill.style.width = info.scan_progress + '%';
+      } else {
+        fill.className = 'scan-bar-fill indeterminate';
+        fill.style.width = '';
+      }
+    } else {
+      wrap.classList.remove('active');
+    }
+  } catch(e) {}
+}
+
+async function loadDevices() {
+  try {
+    const devices = await api('/api/devices');
+    render(devices);
+  } catch(e) {}
+}
+
+async function scanNetwork() {
+  const btn = document.getElementById('scanBtn');
+  btn.disabled = true; btn.textContent = ' Scanning...';
+  await api('/api/scan', { method: 'POST' });
+  document.getElementById('lastScan').textContent = 'Scanning...';
+  const wait = setInterval(async () => {
+    const info = await api('/api/info');
+    if (!info.scanning) {
+      clearInterval(wait);
+      btn.disabled = false; btn.textContent = ' Scan';
+      document.getElementById('lastScan').textContent = new Date().toLocaleTimeString();
+      loadDevices();
+      toast('Scan complete');
+    }
+    loadInfo();
+  }, 800);
+}
+
+function setSort(s) {
+  sortBy = s;
+  document.querySelectorAll('.sort-btn').forEach(b => b.classList.toggle('active', b.dataset.sort === s));
+  loadDevices();
+}
+
+async function toggleDevice(mac) {
+  const d = await api('/api/toggle', { method: 'POST', body: JSON.stringify({ mac }) });
+  if (!d.success) { toast(d.state, 'error'); return; }
+  toast(d.state === 'Disconnected' ? 'Device blocked' : 'Device restored');
+  loadDevices();
+}
+
+function renameDevice(mac, input, oldName) {
+  const name = input.value.trim();
+  if (name === oldName) return;
+  api('/api/rename', { method: 'POST', body: JSON.stringify({ mac, name }) });
+  loadDevices();
+}
+
+function restoreAll() {
+  const btn = document.getElementById('restoreBtn');
+  btn.disabled = true; btn.textContent = ' Restoring...';
+  api('/api/restore_all', { method: 'POST' }).then(() => {
+    btn.disabled = false; btn.textContent = ' Restore All';
+    loadDevices();
+    toast('All restored');
+  });
+}
+
+function startRename(span, mac, currentName) {
+  const input = document.createElement('input');
+  input.className = 'device-name-input';
+  input.value = currentName; input.maxLength = 40;
+  span.replaceWith(input); input.focus(); input.select();
+  const finish = () => renameDevice(mac, input, currentName);
+  input.addEventListener('blur', finish);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape') { input.value = currentName; input.blur(); }
+  });
+}
+
+function fmt(kb) { return kb < 1024 ? kb.toFixed(1) : (kb/1024).toFixed(1); }
+function unit(kb) { return kb < 1024 ? 'KB' : 'MB'; }
+
+function render(devices) {
+  const list = document.getElementById('deviceList');
+  const sorted = [...devices];
+  if (sortBy === 'traffic') sorted.sort((a,b) => b.traffic_kb - a.traffic_kb);
+  else if (sortBy === 'name') sorted.sort((a,b) => (a.display_name||'').localeCompare(b.display_name||''));
+  else sorted.sort((a,b) => a.ip.localeCompare(b.ip, undefined, {numeric:true}));
+
+  let t=0, c=0, d=0, o=0;
+  list.innerHTML = sorted.map(dev => {
+    t++;
+    const isRouter = dev.state.startsWith('Router');
+    const isOff = dev.state === 'Disconnected';
+    const isOffline = dev.state === 'Offline';
+    if (isRouter || (!isOff && !isOffline)) c++;
+    else if (isOff) d++;
+    else o++;
+
+    const name = dev.custom_name || dev.display_name;
+    const bw = Math.min(dev.traffic_kb / 10, 100);
+
+    return `<div class="device-card${isOff ? ' disconnected' : ''}${isRouter ? ' router' : ''}${isOffline ? ' offline' : ''}">
+      <div class="device-status"></div>
+      <div class="device-info">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <div class="device-name" onclick="startRename(this,'${dev.mac}','${esc(name)}')" title="Click to rename">${esc(name)}</div>
+          ${isOff ? '<span class="device-badge badge-cut">BLOCKED</span>' : ''}
+          ${isOffline ? '<span class="device-badge badge-offline">OFFLINE</span>' : ''}
+        </div>
+        <div class="device-meta">
+          <span>${dev.ip}</span>
+          <span>${dev.mac}</span>
+          <span>${dev.vendor !== 'Unknown' ? dev.vendor : ''}</span>
+        </div>
+      </div>
+      <div class="device-traffic">
+        <span class="num">${fmt(dev.traffic_kb)}</span> <span class="label">${unit(dev.traffic_kb)}</span>
+        <div class="traffic-bar"><div class="traffic-bar-fill" style="width:${bw}%"></div></div>
+      </div>
+      <div class="device-actions">
+        ${isRouter ? '<span style="font-size:11px;color:#3fb950">Gateway</span>' : `
+          <button class="toggle-btn ${isOff?'off':'on'}" onclick="toggleDevice('${dev.mac}')" title="${isOff?'Restore':'Block'}"></button>
+        `}
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('totalCount').textContent = t;
+  document.getElementById('connectedCount').textContent = c;
+  document.getElementById('disconnectedCount').textContent = d;
+  document.getElementById('offlineCount').textContent = o;
+}
+
+function esc(s) { const e=document.createElement('div'); e.textContent=s; return e.innerHTML; }
+
+loadInfo();
+loadDevices();
+setInterval(() => { loadInfo(); loadDevices(); }, 3000);
+</script>
+</body>
+</html>

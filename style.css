@@ -1,0 +1,451 @@
+/* ===========================
+   Football Desk — stylesheet
+   =========================== */
+
+/* RESET */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #f5f5f3;
+  color: #1a1a1a;
+  font-size: 14px;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ===========================
+   NAVIGATION
+   =========================== */
+nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-bottom: 1px solid #e0e0e0;
+  background: #fff;
+  position: sticky;
+  top: 0;
+  z-index: 99;
+}
+
+.nav-logo {
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-links {
+  display: flex;
+  gap: 4px;
+}
+
+.nav-links a {
+  font-size: 12px;
+  color: #666;
+  padding: 5px 10px;
+  border-radius: 6px;
+  transition: background 0.15s;
+}
+
+.nav-links a:hover {
+  background: #f0f0f0;
+  color: #1a1a1a;
+}
+
+/* ===========================
+   BREAKING NEWS TICKER
+   =========================== */
+.ticker {
+  background: #fff1f1;
+  border-bottom: 1px solid #fcd5d5;
+  padding: 6px 20px;
+  font-size: 11px;
+  color: #c0392b;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ticker span {
+  display: inline-block;
+  animation: tick 24s linear infinite;
+}
+
+@keyframes tick {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(-200%); }
+}
+
+/* ===========================
+   HERO SECTION
+   =========================== */
+.hero {
+  padding: 24px 20px 20px;
+  border-bottom: 1px solid #e0e0e0;
+  background: #fff;
+}
+
+.hero-eyebrow {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #888;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.hero h1 {
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.25;
+  margin-bottom: 10px;
+  max-width: 720px;
+}
+
+.hero-meta {
+  font-size: 11px;
+  color: #888;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #ccc;
+  display: inline-block;
+}
+
+/* ===========================
+   MAIN LAYOUT (grid)
+   =========================== */
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 240px;
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.feed {
+  border-right: 1px solid #e0e0e0;
+}
+
+/* ===========================
+   ARTICLE CARDS
+   =========================== */
+.article {
+  padding: 16px 20px;
+  border-bottom: 1px solid #e8e8e8;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.article:hover {
+  background: #fafafa;
+}
+
+.article:last-child {
+  border-bottom: none;
+}
+
+.art-tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #2563eb;
+  margin-bottom: 5px;
+}
+
+.art-tag.red   { color: #c0392b; }
+.art-tag.green { color: #16a34a; }
+
+.art-h {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-bottom: 5px;
+}
+
+.art-p {
+  font-size: 12px;
+  color: #555;
+  line-height: 1.6;
+}
+
+.art-meta {
+  font-size: 11px;
+  color: #aaa;
+  margin-top: 6px;
+}
+
+/* ===========================
+   SIDEBAR
+   =========================== */
+.side-block {
+  padding: 14px 16px;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.side-h {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #aaa;
+  margin-bottom: 10px;
+}
+
+/* Score rows */
+.score-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.score-row:last-child { border: none; }
+
+.teams {
+  font-size: 12px;
+  color: #555;
+}
+
+.score {
+  font-weight: 600;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Transfer rows */
+.transfer-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 12px;
+}
+
+.transfer-row:last-child { border: none; }
+
+.ticon {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #eff6ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+  font-size: 12px;
+}
+
+.t-name {
+  font-weight: 600;
+  color: #1a1a1a;
+  line-height: 1.2;
+}
+
+.t-sub {
+  color: #999;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+/* Status pills */
+.pill {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 20px;
+  font-weight: 600;
+}
+
+.pill.red   { background: #fff1f1; color: #c0392b; }
+.pill.blue  { background: #eff6ff; color: #2563eb; }
+.pill.green { background: #f0fdf4; color: #16a34a; }
+
+.pill.live {
+  background: #c0392b;
+  color: #fff;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.6; }
+}
+
+/* ===========================
+   TABLE (PL standings)
+   =========================== */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+th {
+  text-align: left;
+  color: #888;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 0;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+td {
+  padding: 5px 0;
+  border-bottom: 1px solid #f0f0f0;
+  color: #555;
+}
+
+td:last-child {
+  text-align: right;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+tr:last-child td { border: none; }
+
+/* ===========================
+   SUBSCRIBE FORM
+   =========================== */
+.subscribe {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 28px 20px;
+}
+
+.subscribe h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.subscribe p {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 18px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.subscribe input,
+.subscribe select,
+.subscribe textarea {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  background: #fff;
+  color: #1a1a1a;
+  outline: none;
+}
+
+.subscribe input:focus,
+.subscribe select:focus,
+.subscribe textarea:focus {
+  border-color: #2563eb;
+}
+
+.subscribe textarea {
+  resize: vertical;
+  min-height: 70px;
+  margin-bottom: 10px;
+}
+
+.subscribe button {
+  background: #1a1a1a;
+  color: #fff;
+  border: none;
+  padding: 9px 22px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.subscribe button:hover {
+  background: #333;
+}
+
+/* ===========================
+   HEADINGS DEMO SECTION
+   =========================== */
+.heading-demo {
+  padding: 16px 20px;
+  border-bottom: 1px solid #e8e8e8;
+  background: #fafafa;
+}
+
+.heading-demo h2 { font-size: 16px; font-weight: 600; color: #1a1a1a; }
+.heading-demo h3 { font-size: 14px; font-weight: 600; color: #333; }
+.heading-demo h4 { font-size: 12px; font-weight: 600; color: #555; text-transform: uppercase; letter-spacing: 0.05em; }
+.heading-demo h5 { font-size: 11px; font-weight: 600; color: #888; }
+.heading-demo h6 { font-size: 10px; font-weight: 600; color: #aaa; }
+
+/* ===========================
+   FOOTER LINKS
+   =========================== */
+.footer {
+  padding: 12px 20px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: #fff;
+  border-top: 1px solid #e0e0e0;
+}
+
+.footer a {
+  font-size: 11px;
+  color: #555;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+  transition: background 0.12s;
+}
+
+.footer a:hover { background: #f5f5f3; }
+
+.footer a svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+/* ===========================
+   RESPONSIVE
+   =========================== */
+@media (max-width: 640px) {
+  .layout          { grid-template-columns: 1fr; }
+  .feed            { border-right: none; }
+  .form-row        { grid-template-columns: 1fr; }
+}
