@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from collections import defaultdict, deque
 
+sys.setswitchinterval(0.0005)
+
 import netifaces
 from scapy.all import *
 from scapy.layers.l2 import Ether, ARP
@@ -52,15 +54,10 @@ class TrafficMonitor:
                 self.traffic[pkt[IP].dst] += size
 
     def start(self, interface):
-        self.traffic.clear(); self.stop_event.clear()
-        self.thread = threading.Thread(target=self._run, args=(interface,), daemon=True)
-        self.thread.start()
+        with self.lock:
+            self.traffic.clear()
 
-    def _run(self, interface):
-        sniff(iface=interface, prn=self.packet_handler, store=0,
-              stop_filter=lambda p: self.stop_event.is_set())
-
-    def stop(self): self.stop_event.set()
+    def stop(self): pass
     def get_traffic(self):
         with self.lock:
             return {ip: round(b/1024, 1) for ip, b in self.traffic.items()}
@@ -177,12 +174,7 @@ class DomainWatcher:
 
     def start(self, interface):
         self.stop_event.clear()
-        self.thread = threading.Thread(target=self._run, args=(interface,), daemon=True)
-        self.thread.start()
-
-    def _run(self, interface):
-        sniff(iface=interface, prn=self.packet_handler, store=0,
-              stop_filter=lambda p: self.stop_event.is_set())
+        self.domains.clear()
 
     def set_stop(self):
         self.stop_event.set()
@@ -307,7 +299,8 @@ class TokenBucketForwarder:
             if kbps and kbps > 0:
                 self._targets[ip] = {"kbps": kbps, "mac": mac,
                                      "watch": bool(watch),
-                                     "q": deque(), "qbytes": 0,
+                                     "q": deque(), "cq": deque(),
+                                     "qbytes": 0, "cbytes": 0,
                                      "tokens": 0.0, "last": time.time(),
                                      "bw_bytes": 0, "bw_last": time.time()}
             else:
@@ -323,9 +316,7 @@ class TokenBucketForwarder:
 
     def start(self):
         self.stop_event.clear()
-        if not (self.thread and self.thread.is_alive()):
-            self.thread = threading.Thread(target=self._run, args=(self.interface,), daemon=True)
-            self.thread.start()
+        self._open_sock()
         if not (self.drain_thread and self.drain_thread.is_alive()):
             self.drain_thread = threading.Thread(target=self._drain, daemon=True)
             self.drain_thread.start()
@@ -350,8 +341,6 @@ class TokenBucketForwarder:
 
     def _run(self, interface):
         self._open_sock()
-        sniff(iface=interface, prn=self._on_packet, store=0,
-              stop_filter=lambda p: self.stop_event.is_set())
 
     def _send(self, frame_bytes):
         try:
@@ -378,7 +367,13 @@ class TokenBucketForwarder:
                 targets = list(self._targets.values())
             for t in targets:
                 if t["watch"]:
-                    q = t["q"]
+                    q = t["q"]; cq = t["cq"]
+                    while cq:
+                        b = cq.popleft()
+                        t["cbytes"] -= len(b)
+                        if not self._send(b): self.stats["dropped"] += 1
+                        did = True
+                        if self.stop_event.is_set(): return
                     while q:
                         b = q.popleft()
                         t["qbytes"] -= len(b)
@@ -389,21 +384,17 @@ class TokenBucketForwarder:
                 rate = (t["kbps"] * 1000) / 8.0
                 t["tokens"] = min(t["tokens"] + (now - t["last"]) * rate, rate * 1.0)
                 t["last"] = now
-                q = t["q"]
-                # Fast-path: pull small control frames (SYN/ACK/FIN/DNS etc.)
-                # out from BEHIND bulk data so handshakes never wait in line.
-                # Rebuild the deque in one pass: keep big frames, send small ones.
-                small = [b for b in q if len(b) < 100]
-                if small:
-                    big = deque(b for b in q if len(b) >= 100)
-                    t["q"].clear(); t["q"].extend(big)
-                    t["qbytes"] = sum(len(b) for b in big)
-                    for b in small:
-                        t["tokens"] -= len(b)
-                        t["bw_bytes"] += len(b)
-                        if not self._send(b): self.stats["dropped"] += 1
-                        did = True
-                        if self.stop_event.is_set(): return
+                q = t["q"]; cq = t["cq"]
+                # Control frames (SYN/ACK/DNS, run <100B) get priority: send
+                # them immediately so TCP handshakes never wait behind bulk
+                # data in the paced queue.
+                while cq:
+                    b = cq.popleft()
+                    t["cbytes"] -= len(b)
+                    t["bw_bytes"] += len(b)
+                    if not self._send(b): self.stats["dropped"] += 1
+                    did = True
+                    if self.stop_event.is_set(): return
                 while q and t["tokens"] >= len(q[0]):
                     b = q.popleft()
                     t["qbytes"] -= len(b)
@@ -449,8 +440,13 @@ class TokenBucketForwarder:
             else:
                 out = Ether(dst=self.gateway_mac, src=self.our_mac) / pkt[IP]
             with self.lock:
-                entry["q"].append(bytes(out))
-                entry["qbytes"] += len(out)
+                out_b = bytes(out)
+                if len(out_b) < 100:
+                    entry["cq"].append(out_b)
+                    entry["cbytes"] += len(out_b)
+                else:
+                    entry["q"].append(out_b)
+                    entry["qbytes"] += len(out_b)
                 self.stats["enqueued"] += 1
         except Exception as ex:
             self.stats["errors"] += 1
@@ -466,8 +462,9 @@ class TokenBucketForwarder:
                 t["bw_last"] = now
                 targets[ip] = {"kbps": t["kbps"], "mac": t["mac"],
                                "watch": t["watch"],
-                               "qbytes": t["qbytes"],
-                               "queued_frames": len(t["q"]),
+                               "qbytes": t["qbytes"] + t["cbytes"],
+                               "queued_frames": len(t["q"]) + len(t["cq"]),
+                               "control_queued": len(t["cq"]),
                                "live_mbps": live}
             return {"targets": targets, "stats": dict(self.stats)}
 
@@ -489,6 +486,8 @@ class NetCutController:
         self._last_traffic_total = 0
         self.auto_scan_stop = threading.Event()
         self.auto_scan_thread = None
+        self.capture_thread = None
+        self.capture_stop = threading.Event()
         self.our_mac = None
         self.our_ip = None
 
@@ -571,14 +570,14 @@ class NetCutController:
         vendor = self.get_vendor(mac)
         return hostname, vendor
 
-    def arp_scan(self, passes=3):
+    def arp_scan(self, passes=2, timeout=2.0):
         conf.verb = 0
         target = self.gateway_ip.rsplit('.', 1)[0] + ".1/24"
         req = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=target)
         result = {}
         for _ in range(passes):
             try:
-                ans, _ = srp(req, timeout=3, retry=1, verbose=False)
+                ans, _ = srp(req, timeout=timeout, retry=0, verbose=False)
             except Exception:
                 continue
             for s, r in ans:
@@ -598,7 +597,7 @@ class NetCutController:
             d.spoof_stop = None; d.spoof_thread = None
 
         self.scan_progress = 10
-        found = self.arp_scan(passes=3)
+        found = self.arp_scan(passes=2)
         self.scan_progress = 60
         self.forwarder.configure(gateway_mac=self.gateway_mac)
         self.merge_scan_results(found)
@@ -607,11 +606,27 @@ class NetCutController:
                 self._start_spoof(d)
         self.devices.sort(key=lambda x: x.ip)
         self.scan_progress = 100
+        self._start_capture()
+        self.scanning = False
+        return self.devices
+
+    def _start_capture(self):
         self.traffic.stop(); self.traffic.start(self.interface)
         self.watcher.set_stop(); self.watcher.start(self.interface)
         self.forwarder.start()
-        self.scanning = False
-        return self.devices
+        if self.capture_thread and self.capture_thread.is_alive():
+            return
+        self.capture_stop = threading.Event()
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.capture_thread.start()
+
+    def _capture_loop(self):
+        def feed(pkt):
+            self.traffic.packet_handler(pkt)
+            self.watcher.packet_handler(pkt)
+            self.forwarder._on_packet(pkt)
+        sniff(iface=self.interface, prn=feed, store=0,
+              stop_filter=lambda p: self.capture_stop.is_set())
 
     def merge_scan_results(self, found):
         now = time.time()
@@ -815,6 +830,7 @@ class NetCutController:
         self.traffic.stop()
         self.forwarder.set_stop(); self.forwarder.clear()
         self.watcher.set_stop()
+        if self.capture_stop: self.capture_stop.set()
         if self.auto_scan_thread: self.auto_scan_stop.set()
         for d in self.devices:
             self._stop_spoof(d); self._restore(d)
@@ -941,9 +957,9 @@ if __name__ == '__main__':
     if not success: print(f"Error: {err}"); sys.exit(1)
     print(f"Interface: {controller.interface} ({controller.ip})")
     print(f"Gateway: {controller.gateway_ip}")
-    print("Scanning...")
-    controller.scan_network()
+    print("Scanning in background...")
+    threading.Thread(target=controller.scan_network, daemon=True).start()
     controller.start_auto_scan()
-    print(f"Found {len(controller.devices)} device(s). Web UI: http://0.0.0.0:5000")
+    print(f"Web UI: http://0.0.0.0:5000")
     signal.signal(signal.SIGINT, lambda s, f: (cleanup(), os._exit(0)))
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
