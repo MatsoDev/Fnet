@@ -303,7 +303,8 @@ class TokenBucketForwarder:
                                      "qbytes": 0, "cbytes": 0,
                                      "tokens": 0.0, "last": time.time(),
                                      "bw_bytes": 0, "bw_last": time.time(),
-                                     "down": 0, "up": 0}
+                                     "down": 0, "up": 0,
+                                     "trace": deque(maxlen=24)}
             else:
                 self._targets.pop(ip, None)
 
@@ -424,22 +425,19 @@ class TokenBucketForwarder:
             e = pkt[Ether]; ip = pkt[IP]
             if e.src == self.our_mac: return
             if self.gateway_ip is None: return
-            gw = self.gateway_ip
             src, dst = ip.src, ip.dst
-            entry = None
-            if src == gw:
-                entry = self._entry(dst)
-            elif dst == gw and src == self.our_ip:
+            if dst == self.gateway_ip and src == self.our_ip:
                 return
-            elif dst == gw:
-                entry = self._entry(src)
-            else:
-                entry = self._entry(src) or self._entry(dst) or None
-            if entry is None: return
-            if src == gw:
+            tgt_dst = self._entry(dst)      # packet addressed TO a throttled dev
+            tgt_src = self._entry(src)      # packet sent FROM a throttled dev
+            if tgt_dst is None and tgt_src is None:
+                return
+            if tgt_dst is not None:
+                entry = tgt_dst
                 out = Ether(dst=entry["mac"], src=self.our_mac) / pkt[IP]
                 entry["down"] += 1
             else:
+                entry = tgt_src
                 out = Ether(dst=self.gateway_mac, src=self.our_mac) / pkt[IP]
                 entry["up"] += 1
             with self.lock:
@@ -451,8 +449,11 @@ class TokenBucketForwarder:
                     entry["q"].append(out_b)
                     entry["qbytes"] += len(out_b)
                 self.stats["enqueued"] += 1
+                self.stats["last_frame"] = "%s->%s %dB" % (
+                    src, dst, len(out_b))
         except Exception as ex:
             self.stats["errors"] += 1
+            self.stats["last_error"] = repr(ex)
 
     def report(self):
         now = time.time()
