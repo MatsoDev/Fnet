@@ -1,6 +1,6 @@
 # Fnet — NetCut Pro
 
-![Version](https://img.shields.io/badge/version-2.1.0-7c6cff)
+![Version](https://img.shields.io/badge/version-2.1.1-7c6cff)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-31c8ff)
 
 An interactive network management, auditing, and **bandwidth control** tool written in Python with a web UI. It scans your local subnet, identifies connected devices (hostname + MAC vendor), and lets you control their internet access using ARP cache poisoning — cutting them off, rate-limiting them, or enforcing an internet quota automatically.
@@ -9,7 +9,12 @@ An interactive network management, auditing, and **bandwidth control** tool writ
 
 ---
 
-## What's New in v2.1.0
+## What's New in v2.1.1
+
+* Enforces the selected cap across small TCP ACK/DNS/control frames as well as bulk data. Control frames retain queue priority but no longer bypass the token bucket.
+* Reduces the burst window from one second to 100 ms so short iPhone speed tests reflect the configured rate.
+
+### Previous v2.1.0 improvements
 
 * Fixed the bidirectional ARP responder so gateway replies go back to the target device instead of being misdirected to the gateway.
 * Re-poisons both ARP legs immediately when a genuine device or gateway reply tries to repair the path.

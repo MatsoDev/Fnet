@@ -13,7 +13,7 @@ from scapy.layers.inet import IP
 from flask import Flask, jsonify, request, render_template
 
 DATA_FILE = Path(__file__).parent / "devices.json"
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 app = Flask(__name__)
 
 class Device:
@@ -422,15 +422,19 @@ class TokenBucketForwarder:
                         if self.stop_event.is_set(): return
                     continue
                 rate = (t["kbps"] * 1000) / 8.0
-                t["tokens"] = min(t["tokens"] + (now - t["last"]) * rate, rate * 1.0)
+                # Keep only a short burst allowance. A one-second bucket made
+                # low limits look ineffective during short mobile speed tests.
+                burst = max(rate * 0.1, 2048)
+                t["tokens"] = min(t["tokens"] + (now - t["last"]) * rate, burst)
                 t["last"] = now
                 q = t["q"]; cq = t["cq"]
-                # Control frames (SYN/ACK/DNS, run <100B) get priority: send
-                # them immediately so TCP handshakes never wait behind bulk
-                # data in the paced queue.
-                while cq:
+                # Control frames (SYN/ACK/DNS, usually <100B) keep priority,
+                # but they must consume tokens too. Sending them unmetered let
+                # iPhone TCP ACK traffic add ~0.5 Mbps above the selected cap.
+                while cq and t["tokens"] >= len(cq[0]):
                     b = cq.popleft()
                     t["cbytes"] -= len(b)
+                    t["tokens"] -= len(b)
                     t["bw_bytes"] += len(b)
                     if not self._send(b): self.stats["dropped"] += 1
                     did = True
@@ -443,11 +447,17 @@ class TokenBucketForwarder:
                     if not self._send(b): self.stats["dropped"] += 1
                     did = True
                     if self.stop_event.is_set(): return
-                if t["qbytes"] > MAX_Q:
-                    excess = t["qbytes"] - MAX_Q
+                if t["qbytes"] + t["cbytes"] > MAX_Q:
+                    excess = t["qbytes"] + t["cbytes"] - MAX_Q
                     while q and excess > 0:
                         b = q.popleft()
                         t["qbytes"] -= len(b)
+                        excess -= len(b)
+                        self.stats["dropped"] += 1
+                        if self.stop_event.is_set(): return
+                    while cq and excess > 0:
+                        b = cq.popleft()
+                        t["cbytes"] -= len(b)
                         excess -= len(b)
                         self.stats["dropped"] += 1
                         if self.stop_event.is_set(): return

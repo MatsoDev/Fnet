@@ -1,6 +1,7 @@
 import importlib.util
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -56,6 +57,26 @@ class ForwarderTests(unittest.TestCase):
             src="192.168.1.10", dst="8.8.8.8") / Raw(b"x" * 100)
         forwarder._on_packet(packet)
         self.assertEqual(forwarder.report()["targets"]["192.168.1.10"]["health"], "active")
+
+    def test_small_control_frames_are_token_limited(self):
+        forwarder = fnet.TokenBucketForwarder()
+        sent = []
+        forwarder._send = lambda frame: sent.append(len(frame)) or True
+        forwarder.set_target("192.168.1.10", 500, "02:00:00:00:00:10")
+        target = forwarder._targets["192.168.1.10"]
+        for _ in range(2000):
+            target["cq"].append(b"x" * 74)
+            target["cbytes"] += 74
+
+        worker = threading.Thread(target=forwarder._drain)
+        worker.start()
+        time.sleep(0.4)
+        forwarder.stop_event.set()
+        worker.join(timeout=2)
+
+        sent_bytes = sum(sent)
+        self.assertGreater(sent_bytes, 10_000)
+        self.assertLess(sent_bytes, 45_000)
 
 
 class ControllerTests(unittest.TestCase):
