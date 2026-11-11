@@ -277,7 +277,7 @@
 <div class="container">
   <header>
     <div>
-      <h1>Fnet <span>Control</span><span class="version-badge" id="versionBadge">v2.1.1</span></h1>
+      <h1>Fnet <span>Control</span><span class="version-badge" id="versionBadge">v2.2.0</span></h1>
       <div class="info" id="headerInfo">Loading...</div>
     </div>
     <div class="info" style="font-size:12px;display:flex;gap:10px;align-items:center">
@@ -362,6 +362,7 @@ let sortBy = 'ip';
 let quotaDirty = false;
 let watchLanEnabled = false;
 let forwarderTargets = {};
+let lastSafetyEventTime = 0;
 
 async function api(url, opts) {
   const res = await fetch(url, {
@@ -475,6 +476,12 @@ async function loadForwarder() {
   try {
     const report = await api('/api/forwarder');
     forwarderTargets = report.targets || {};
+    const events = report.safety_events || [];
+    const latest = events.length ? events[events.length - 1] : null;
+    if (latest && latest.time > lastSafetyEventTime) {
+      if (lastSafetyEventTime) toast(latest.reason, 'error');
+      lastSafetyEventTime = latest.time;
+    }
   } catch(e) { forwarderTargets = {}; }
 }
 
@@ -671,6 +678,7 @@ function render(devices) {
           ${isThr ? `<span class="device-badge badge-throttle">LIMIT ${fmtSpeed(thrKbps)}</span>` : ''}
           ${isWatch ? '<span class="device-badge badge-throttle">WATCHING</span>' : ''}
           ${isOffline ? '<span class="device-badge badge-offline">OFFLINE</span>' : ''}
+          ${dev.relay_error ? `<span class="device-badge badge-relay-error" title="${attr(dev.relay_error)}">RELAY STOPPED</span>` : ''}
           ${relayBadge}
         </div>
         <div class="device-meta">

@@ -91,6 +91,8 @@ class ControllerTests(unittest.TestCase):
         self.controller._restore = Mock()
         self.controller._start_spoof = Mock()
         self.controller._stop_spoof = Mock()
+        self.controller._pin_control_path = Mock(return_value=True)
+        self.controller._unpin_local_neighbor = Mock()
 
         self.gateway = fnet.Device(self.controller.gateway_ip, self.controller.gateway_mac)
         self.gateway.state = "Router (Connected)"
@@ -174,6 +176,43 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(self.first.state, "Connected")
         self.assertFalse(self.controller.watch_lan_enabled)
+
+    def test_asymmetric_relay_is_stopped_and_restored(self):
+        self.first.state = "Throttled"
+        self.first.throttle_kbps = 500
+        self.controller.forwarder.set_target(self.first.ip, 500, self.first.mac)
+        target = self.controller.forwarder._targets[self.first.ip]
+        target["created"] = time.time() - 10
+        target["up"] = 1000
+        target["down"] = 0
+
+        self.controller._check_relay_safety()
+
+        self.assertEqual(self.first.state, "Connected")
+        self.assertIsNone(self.first.throttle_kbps)
+        self.assertIn("both directions", self.first.relay_error)
+        self.assertNotIn(self.first.ip, self.controller.forwarder.active())
+        self.assertEqual(len(self.controller.safety_events), 1)
+
+    def test_control_does_not_start_when_local_neighbor_protection_fails(self):
+        self.controller._pin_control_path.return_value = False
+        ok, message = self.controller.set_throttle(self.first.mac, 500)
+        self.assertFalse(ok)
+        self.assertIn("protect", message)
+        self.assertEqual(self.first.state, "Connected")
+        self.assertNotIn(self.first.ip, self.controller.forwarder.active())
+
+    def test_saved_intercept_is_not_resumed_after_restart(self):
+        fresh = fnet.NetCutController()
+        fresh.gateway_ip = self.controller.gateway_ip
+        fresh.our_mac = self.controller.our_mac
+        fresh.saved_data[self.first.mac] = {"state": "Throttled", "throttle_kbps": 500}
+        fresh.get_device_info = Mock(return_value=(None, None))
+
+        fresh.merge_scan_results({self.first.mac: self.first.ip})
+
+        self.assertEqual(fresh.devices[0].state, "Connected")
+        self.assertNotIn(self.first.ip, fresh.forwarder.active())
 
     def test_api_rejects_inverted_quota_thresholds_and_hides_blocked_usage(self):
         old_controller = fnet.controller

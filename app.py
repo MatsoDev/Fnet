@@ -13,7 +13,7 @@ from scapy.layers.inet import IP
 from flask import Flask, jsonify, request, render_template
 
 DATA_FILE = Path(__file__).parent / "devices.json"
-VERSION = "2.1.1"
+VERSION = "2.2.0"
 app = Flask(__name__)
 
 class Device:
@@ -25,6 +25,7 @@ class Device:
         self.spoof_stop = None; self.spoof_thread = None
         self.throttle_kbps = None
         self.watch = False
+        self.relay_error = None
         self.first_seen = time.time()
         self.last_seen = time.time()
 
@@ -38,6 +39,7 @@ class Device:
                 "state": self.state, "display_name": dn,
                 "throttle_kbps": self.throttle_kbps,
                 "watch": self.watch,
+                "relay_error": self.relay_error,
                 "first_seen": self.first_seen, "last_seen": self.last_seen}
 
 class TrafficMonitor:
@@ -538,6 +540,13 @@ class TokenBucketForwarder:
                                "live_mbps": live}
             return {"targets": targets, "stats": dict(self.stats)}
 
+    def health_snapshot(self):
+        now = time.time()
+        with self.lock:
+            return {ip: {"age": now - t["created"], "up": t["up"],
+                         "down": t["down"], "watch": t["watch"]}
+                    for ip, t in self._targets.items()}
+
 def open_l2socket(iface):
     from scapy.config import conf
     return conf.L2socket(iface=iface)
@@ -563,6 +572,10 @@ class NetCutController:
         self.state_lock = threading.RLock()
         self.watch_lan_enabled = False
         self.watch_lan_macs = set()
+        self.pinned_neighbors = {}
+        self.safety_stop = threading.Event()
+        self.safety_thread = None
+        self.safety_events = deque(maxlen=20)
 
     def save_quota(self):
         with self.state_lock:
@@ -653,6 +666,50 @@ class NetCutController:
         vendor = self.get_vendor(mac)
         return hostname, vendor
 
+    def _pin_local_neighbor(self, ip, mac):
+        """Keep forged ARP packets from poisoning this PC's own cache."""
+        if not ip or not mac or mac.lower() == (self.our_mac or '').lower():
+            return False
+        try:
+            if os.name == 'nt':
+                cmd = ["netsh", "interface", "ipv4", "set", "neighbors",
+                       f"interface={self._iface_idx}", f"address={ip}",
+                       f"neighbor={mac.replace(':', '-')}", "store=active"]
+            else:
+                cmd = ["ip", "neigh", "replace", ip, "lladdr", mac,
+                       "nud", "permanent", "dev", self.interface]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                self.pinned_neighbors[ip] = mac
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _unpin_local_neighbor(self, ip):
+        if ip not in self.pinned_neighbors:
+            return
+        try:
+            if os.name == 'nt':
+                cmd = ["netsh", "interface", "ipv4", "delete", "neighbors",
+                       f"interface={self._iface_idx}", f"address={ip}",
+                       "store=active"]
+            else:
+                cmd = ["ip", "neigh", "del", ip, "dev", self.interface]
+            subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+        except Exception:
+            pass
+        self.pinned_neighbors.pop(ip, None)
+
+    def _pin_control_path(self, dev):
+        gateway_ok = self._pin_local_neighbor(self.gateway_ip, self.gateway_mac)
+        target_ok = self._pin_local_neighbor(dev.ip, dev.mac)
+        return gateway_ok and target_ok
+
+    def _clear_neighbor_pins(self):
+        for ip in list(self.pinned_neighbors):
+            self._unpin_local_neighbor(ip)
+
     def arp_scan(self, passes=2, timeout=2.0):
         conf.verb = 0
         netmask = None
@@ -717,6 +774,48 @@ class NetCutController:
         self.capture_stop = threading.Event()
         self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.capture_thread.start()
+        self.safety_stop.clear()
+        if not (self.safety_thread and self.safety_thread.is_alive()):
+            self.safety_thread = threading.Thread(target=self._safety_loop, daemon=True)
+            self.safety_thread.start()
+
+    def _safety_loop(self):
+        while not self.safety_stop.wait(2.0):
+            try:
+                self._check_relay_safety()
+            except Exception:
+                pass
+
+    def _check_relay_safety(self):
+        for ip, status in self.forwarder.health_snapshot().items():
+            dominant = max(status["up"], status["down"])
+            minority = min(status["up"], status["down"])
+            asymmetric = (dominant >= 500 and
+                          (minority < 5 or minority / dominant < 0.002))
+            if status["age"] < 8 or not asymmetric:
+                continue
+            device = next((d for d in self.devices if d.ip == ip), None)
+            if not device:
+                continue
+            reason = ("Relay safety stopped this control: traffic was not "
+                      "crossing Fnet in both directions.")
+            if status["watch"]:
+                self.set_watch(device.mac, False, bypass_quota=True)
+            else:
+                self.set_throttle(device.mac, 0, bypass_quota=True)
+            device.relay_error = reason
+            self.watch_lan_macs.discard(device.mac)
+            if not self.watch_lan_macs:
+                self.watch_lan_enabled = False
+            self.quota.managed_devices.pop(device.mac, None)
+            self.quota.enabled = False
+            self.safety_events.append({"time": time.time(), "ip": ip,
+                                       "mac": device.mac, "reason": reason,
+                                       "up_frames": status["up"],
+                                       "down_frames": status["down"]})
+            self.save_device(device.mac, {"state": "Connected",
+                                          "throttle_kbps": None})
+            self.save_quota()
 
     def _capture_loop(self):
         def feed(pkt):
@@ -809,12 +908,12 @@ class NetCutController:
                 if found[mac] == self.gateway_ip:
                     dev.state = "Router (Connected)"
                     self.gateway_mac = mac
-                elif saved.get("state") == "Disconnected":
-                    dev.state = "Disconnected"
-                elif saved.get("state") == "Throttled":
-                    dev.state = "Throttled"
-                    dev.throttle_kbps = saved.get("throttle_kbps", 256)
-                    self.forwarder.set_target(found[mac], dev.throttle_kbps, mac)
+                elif saved.get("state") in ("Disconnected", "Throttled", "Watched"):
+                    # Never resume an intercept automatically after a process
+                    # restart. The previous run may have ended during a relay
+                    # failure, and silently reapplying it can disrupt the LAN.
+                    self.save_device(mac, {"state": "Connected",
+                                           "throttle_kbps": None})
                 self.devices.append(dev)
 
         for mac, ip in found.items():
@@ -880,9 +979,12 @@ class NetCutController:
                 if self._quota_restricted(mac, bypass_quota):
                     return False, "Quota Auto-Mode is controlling this device."
                 if d.state != "Disconnected":
+                    if not self._pin_control_path(d):
+                        return False, "Could not protect this PC's neighbor table; control was not started."
                     d.state = "Disconnected"
                     d.watch = False
                     d.throttle_kbps = None
+                    d.relay_error = None
                     self.forwarder.set_target(d.ip, 0)
                     self._start_spoof(d)
                     self.traffic.clear_ip(d.ip)
@@ -891,6 +993,7 @@ class NetCutController:
                 else:
                     self._stop_spoof(d)
                     self._restore(d)
+                    self._unpin_local_neighbor(d.ip)
                     d.state = "Connected"
                     self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
                     return True, "Connected"
@@ -906,15 +1009,20 @@ class NetCutController:
                 if not kbps or kbps <= 0:
                     self._stop_spoof(d)
                     self._restore(d)
+                    self._unpin_local_neighbor(d.ip)
                     d.state = "Connected"
                     d.throttle_kbps = None
                     d.watch = False
+                    d.relay_error = None
                     self.forwarder.set_target(d.ip, 0)
                     self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
                     return True, "Restored"
+                if not self._pin_control_path(d):
+                    return False, "Could not protect this PC's neighbor table; limit was not started."
                 d.throttle_kbps = kbps
                 d.state = "Throttled"
                 d.watch = False
+                d.relay_error = None
                 self._start_spoof(d)
                 self.forwarder.set_target(d.ip, kbps, d.mac)
                 self.save_device(mac, {"state": "Throttled", "throttle_kbps": kbps})
@@ -929,9 +1037,12 @@ class NetCutController:
                 if self._quota_restricted(mac, bypass_quota):
                     return False, "Quota Auto-Mode is controlling this device."
                 if watch:
+                    if not self._pin_control_path(d):
+                        return False, "Could not protect this PC's neighbor table; watch was not started."
                     d.watch = True
                     d.state = "Watched"
                     d.throttle_kbps = None
+                    d.relay_error = None
                     self._start_spoof(d)
                     self.forwarder.set_target(d.ip, 30000, d.mac, watch=True)
                     self.save_device(mac, {"state": "Watched", "throttle_kbps": None})
@@ -940,7 +1051,9 @@ class NetCutController:
                     d.watch = False
                     self._stop_spoof(d)
                     self._restore(d)
+                    self._unpin_local_neighbor(d.ip)
                     d.state = "Connected"
+                    d.relay_error = None
                     self.forwarder.set_target(d.ip, 0)
                     self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
                     return True, "Connected"
@@ -1075,6 +1188,7 @@ class NetCutController:
             self.watcher.set_stop()
             if self.capture_stop: self.capture_stop.set()
             if self.auto_scan_thread: self.auto_scan_stop.set()
+            self.safety_stop.set()
         self.forwarder.clear()
         self.watch_lan_enabled = False
         self.watch_lan_macs.clear()
@@ -1087,7 +1201,9 @@ class NetCutController:
             d.state = "Connected"
             d.throttle_kbps = None
             d.watch = False
+            d.relay_error = None
             self.save_device(d.mac, {"state": "Connected", "throttle_kbps": None})
+        self._clear_neighbor_pins()
         self.save_quota()
 
     def auto_scan_loop(self):
@@ -1186,7 +1302,9 @@ def restore_all():
 
 @app.route('/api/forwarder', methods=['GET'])
 def forwarder_info():
-    return jsonify(controller.forwarder.report())
+    report = controller.forwarder.report()
+    report["safety_events"] = list(controller.safety_events)
+    return jsonify(report)
 
 @app.route('/api/throttle_all', methods=['POST'])
 def throttle_all():

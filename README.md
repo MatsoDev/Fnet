@@ -1,6 +1,6 @@
 # Fnet — NetCut Pro
 
-![Version](https://img.shields.io/badge/version-2.1.1-7c6cff)
+![Version](https://img.shields.io/badge/version-2.2.0-7c6cff)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-31c8ff)
 
 An interactive network management, auditing, and **bandwidth control** tool written in Python with a web UI. It scans your local subnet, identifies connected devices (hostname + MAC vendor), and lets you control their internet access using ARP cache poisoning — cutting them off, rate-limiting them, or enforcing an internet quota automatically.
@@ -9,7 +9,14 @@ An interactive network management, auditing, and **bandwidth control** tool writ
 
 ---
 
-## What's New in v2.1.1
+## What's New in v2.2.0
+
+* Pins truthful gateway and target neighbor entries on the Fnet PC while a control is active, preventing forged relay ARP packets from poisoning the PC's own network path.
+* Adds a fail-safe watchdog: an asymmetric relay is automatically stopped and both ARP tables are restored instead of risking a LAN outage.
+* Clears controls safely when local neighbor protection cannot be installed.
+* Shows **Relay stopped** with the safety reason in the dashboard.
+
+### Previous v2.1.1 improvements
 
 * Enforces the selected cap across small TCP ACK/DNS/control frames as well as bulk data. Control frames retain queue priority but no longer bypass the token bucket.
 * Reduces the burst window from one second to 100 ms so short iPhone speed tests reflect the configured rate.
@@ -65,7 +72,7 @@ After startup, open [http://localhost:5000](http://localhost:5000). Windows user
 * **Per-Device Speed Control** — Drag a slider on any device card to cap its internet speed from **0 up to 30 Mbps** (router-speed default).
 * **Real MITM Rate Limiting** — `TokenBucketForwarder` ARPs-poison the target so its traffic crosses your NIC, then applies a token bucket to the relayed frames — dropping what exceeds your configured bit-rate. WhatsApp/text keeps working; heavy video throttles down. The relay uses a **single persistent raw socket** (not one socket per packet) so full-speed links still relay reliably.
 * **Throttle All** — One-click apply a limit to every device at once.
-* **Persistent state** — Limits survive rescans (stored in `devices.json`).
+* **Safe rescan state** — Active controls survive rescans during the current run, but are intentionally not re-applied after a process restart.
 
 ### Traffic Watch
 Watch which websites each device is visiting, live:
