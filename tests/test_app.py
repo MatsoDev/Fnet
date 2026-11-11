@@ -1,5 +1,6 @@
 import importlib.util
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -39,6 +40,22 @@ class TrafficMonitorTests(unittest.TestCase):
         monitor.packet_handler(packet, {"192.168.1.10", "192.168.1.11"}, set(), None)
         self.assertEqual(monitor.total_bytes(), 0)
         self.assertEqual(set(monitor.snapshot_bytes()), {"192.168.1.10", "192.168.1.11"})
+
+
+class ForwarderTests(unittest.TestCase):
+    def test_report_distinguishes_waiting_from_active_relay(self):
+        forwarder = fnet.TokenBucketForwarder()
+        forwarder.configure(
+            gateway_ip="192.168.1.1", gateway_mac="02:00:00:00:00:01",
+            our_ip="192.168.1.4", our_mac="02:00:00:00:00:99")
+        forwarder.stats["sock_open"] = True
+        forwarder.set_target("192.168.1.10", 1000, "02:00:00:00:00:10")
+        self.assertEqual(forwarder.report()["targets"]["192.168.1.10"]["health"], "waiting")
+
+        packet = Ether(src="02:00:00:00:00:10", dst="02:00:00:00:00:99") / IP(
+            src="192.168.1.10", dst="8.8.8.8") / Raw(b"x" * 100)
+        forwarder._on_packet(packet)
+        self.assertEqual(forwarder.report()["targets"]["192.168.1.10"]["health"], "active")
 
 
 class ControllerTests(unittest.TestCase):
@@ -109,6 +126,33 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.quota.enabled)
         self.controller.forwarder.set_stop.assert_not_called()
         self.assertFalse(self.controller.auto_scan_stop.is_set())
+
+    def test_gateway_arp_request_reply_is_sent_back_to_phone(self):
+        self.first.spoof_stop = threading.Event()
+        self.controller._arp_send = Mock()
+        request = fnet.Ether(src=self.first.mac, dst="ff:ff:ff:ff:ff:ff") / fnet.ARP(
+            op=1, hwsrc=self.first.mac, psrc=self.first.ip,
+            hwdst="00:00:00:00:00:00", pdst=self.controller.gateway_ip)
+
+        self.controller._arp_owner(request)
+
+        reply = self.controller._arp_send.call_args.args[0]
+        self.assertEqual(reply[fnet.Ether].dst, self.first.mac)
+        self.assertEqual(reply[fnet.ARP].hwdst, self.first.mac)
+        self.assertEqual(reply[fnet.ARP].psrc, self.controller.gateway_ip)
+
+    def test_watch_lan_watches_connected_clients_and_restores_them(self):
+        ok, count, _ = self.controller.set_watch_lan(True)
+        self.assertTrue(ok)
+        self.assertEqual(count, 1)
+        self.assertTrue(self.controller.watch_lan_enabled)
+        self.assertEqual(self.first.state, "Watched")
+
+        ok, count, _ = self.controller.set_watch_lan(False)
+        self.assertTrue(ok)
+        self.assertEqual(count, 1)
+        self.assertEqual(self.first.state, "Connected")
+        self.assertFalse(self.controller.watch_lan_enabled)
 
     def test_api_rejects_inverted_quota_thresholds_and_hides_blocked_usage(self):
         old_controller = fnet.controller

