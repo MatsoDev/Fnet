@@ -8,6 +8,7 @@ import netifaces
 import socket
 import urllib.request
 import urllib.error
+import ipaddress
 from scapy.all import *
 from scapy.layers.l2 import Ether, ARP
 
@@ -71,16 +72,29 @@ class NetCutController:
     def discover_interfaces(self):
         """Step 2: Interface Discovery & Selection"""
         try:
-            from scapy.arch.windows import get_windows_if_list
-            iface_list = get_windows_if_list()
             available = []
-            for iface in iface_list:
-                name = iface.get('name', '')
-                ips = [ip for ip in iface.get('ips', []) if '.' in ip and not ip.startswith('169.254')]
-                desc = iface.get('description', '')
-                if ips and name and not any(x in desc for x in ['WAN Miniport', 'Kernel Debug', 'VPN', 'Loopback', 'Teredo', '6to4', 'IP-HTTPS']):
-                    clean_name = name.replace('\u200f', '').strip()
-                    available.append((name, clean_name, ips[0], desc))
+            if os.name == 'nt':
+                from scapy.arch.windows import get_windows_if_list
+                for iface in get_windows_if_list():
+                    name = iface.get('name', '')
+                    ips = [ip for ip in iface.get('ips', [])
+                           if '.' in ip and not ip.startswith('169.254')]
+                    desc = iface.get('description', '')
+                    excluded = ['WAN Miniport', 'Kernel Debug', 'VPN', 'Loopback',
+                                'Teredo', '6to4', 'IP-HTTPS']
+                    if ips and name and not any(x in desc for x in excluded):
+                        clean_name = name.replace('\u200f', '').strip()
+                        available.append((name, clean_name, ips[0], desc))
+            else:
+                for name in netifaces.interfaces():
+                    if name == 'lo':
+                        continue
+                    addresses = netifaces.ifaddresses(name).get(netifaces.AF_INET, [])
+                    for address in addresses:
+                        ip = address.get('addr', '')
+                        if ip and not ip.startswith('169.254'):
+                            available.append((name, name, ip, name))
+                            break
 
             if not available:
                 print(f"{Colors.RED}Error: No usable network interfaces found.{Colors.RESET}")
@@ -160,7 +174,13 @@ class NetCutController:
        
         try:
             # Full subnet scan (includes gateway automatically)
-            target_ip_range = self.gateway_ip.rsplit('.', 1)[0] + ".1/24"
+            netmask = None
+            for address in netifaces.ifaddresses(self.interface).get(netifaces.AF_INET, []):
+                if address.get('addr') == self.ip:
+                    netmask = address.get('netmask')
+                    break
+            target_ip_range = str(ipaddress.ip_network(
+                f"{self.ip}/{netmask or '255.255.255.0'}", strict=False))
             arp_request = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=target_ip_range)
             answered, _ = srp(arp_request, timeout=5, retry=2)
            
@@ -277,31 +297,39 @@ class NetCutController:
     def graceful_shutdown(self, sig, frame):
         """Graceful Shutdown to restore all connections"""
         print(f"{Colors.RED}\nShutting down and restoring all connections...{Colors.RESET}")
+        self.restore_all()
+        sys.exit(0)
+
+    def restore_all(self):
+        """Stop active poison threads and repair both ARP tables."""
         for device in self.devices:
             if device.state == "Disconnected":
                 if device.stop_event:
                     device.stop_event.set()
                 self.restore_target(device.ip, device.mac, self.gateway_ip, self.gateway_mac)
-        sys.exit(0)
+                device.state = "Connected"
 
 def main():
     controller = NetCutController()
     controller.check_root()
     controller.discover_interfaces()
-    controller.scan_network()
-    while controller.running:
-        controller.display_devices()
-        action = input(f"{Colors.YELLOW}Enter action: {Colors.RESET}")
-       
-        if action.lower() == 'q':
-            controller.running = False
-        elif action.lower() == 'r':
-            controller.scan_network()
-        elif action.isdigit():
-            index = int(action) - 1
-            controller.toggle_device(index)
-        else:
-            print(f"{Colors.RED}Invalid action. Please try again.{Colors.RESET}")
+    try:
+        controller.scan_network()
+        while controller.running:
+            controller.display_devices()
+            action = input(f"{Colors.YELLOW}Enter action: {Colors.RESET}")
+
+            if action.lower() == 'q':
+                controller.running = False
+            elif action.lower() == 'r':
+                controller.scan_network()
+            elif action.isdigit():
+                index = int(action) - 1
+                controller.toggle_device(index)
+            else:
+                print(f"{Colors.RED}Invalid action. Please try again.{Colors.RESET}")
+    finally:
+        controller.restore_all()
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, time, signal, threading, socket, subprocess, re, urllib.request, struct
+import os, sys, json, time, signal, threading, socket, subprocess, re, urllib.request, struct, ipaddress, math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from collections import defaultdict, deque
@@ -13,6 +13,7 @@ from scapy.layers.inet import IP
 from flask import Flask, jsonify, request, render_template
 
 DATA_FILE = Path(__file__).parent / "devices.json"
+VERSION = "2.0.0"
 app = Flask(__name__)
 
 class Device:
@@ -42,20 +43,41 @@ class Device:
 class TrafficMonitor:
     def __init__(self):
         self.traffic = defaultdict(int)
+        self.quota_bytes = 0
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread = None
 
-    def packet_handler(self, pkt):
-        if IP in pkt:
-            size = len(pkt)
-            with self.lock:
-                self.traffic[pkt[IP].src] += size
-                self.traffic[pkt[IP].dst] += size
+    def packet_handler(self, pkt, tracked_ips=None, blocked_ips=None, our_mac=None):
+        """Count observed device traffic and quota traffic once per packet.
+
+        Frames transmitted by our relay are ignored because the original frame
+        was already captured on ingress. Blocked-device packets are attempts,
+        not delivered internet usage, so they are excluded entirely. Traffic
+        between two tracked LAN clients is visible per device but is not added
+        to the internet quota.
+        """
+        if IP not in pkt:
+            return
+        if our_mac and Ether in pkt and pkt[Ether].src.lower() == our_mac.lower():
+            return
+        tracked = set(tracked_ips or ())
+        blocked = set(blocked_ips or ())
+        endpoints = {pkt[IP].src, pkt[IP].dst} & tracked
+        active = endpoints - blocked
+        if not active:
+            return
+        size = len(pkt)
+        with self.lock:
+            for ip in active:
+                self.traffic[ip] += size
+            if len(endpoints) == 1:
+                self.quota_bytes += size
 
     def start(self, interface):
         with self.lock:
             self.traffic.clear()
+            self.quota_bytes = 0
 
     def stop(self): pass
     def get_traffic(self):
@@ -68,7 +90,11 @@ class TrafficMonitor:
 
     def total_bytes(self):
         with self.lock:
-            return sum(self.traffic.values())
+            return self.quota_bytes
+
+    def clear_ip(self, ip):
+        with self.lock:
+            self.traffic.pop(ip, None)
 
 class DomainWatcher:
     """Passive watcher that records which domains each device visits.
@@ -174,7 +200,8 @@ class DomainWatcher:
 
     def start(self, interface):
         self.stop_event.clear()
-        self.domains.clear()
+        with self.lock:
+            self.domains.clear()
 
     def set_stop(self):
         self.stop_event.set()
@@ -209,8 +236,7 @@ class QuotaTracker:
         self.prev_snapshot = {}
         self.last_pct = 0.0
         self.mode = None
-        self.throttled_ips = set()
-        self.blocked_ips = set()
+        self.managed_devices = {}
 
     def load(self, cfg):
         if not isinstance(cfg, dict): return
@@ -222,6 +248,8 @@ class QuotaTracker:
             self.block_pct = float(cfg.get("block_pct", self.block_pct))
             self.used_bytes = float(cfg.get("used_bytes", self.used_bytes))
             self.month_start = float(cfg.get("month_start", self.month_start))
+            managed = cfg.get("managed_devices", {})
+            self.managed_devices = managed if isinstance(managed, dict) else {}
 
     def to_dict(self):
         with self.lock:
@@ -238,8 +266,6 @@ class QuotaTracker:
         with self.lock:
             self.used_bytes = 0.0
             self.month_start = time.time()
-            self.throttled_ips.clear()
-            self.blocked_ips.clear()
             self.mode = None
 
     def add_usage(self, delta):
@@ -259,7 +285,8 @@ class QuotaTracker:
                     "throttle_pct": self.throttle_pct,
                     "block_pct": self.block_pct,
                     "used_bytes": self.used_bytes,
-                    "month_start": self.month_start}
+                    "month_start": self.month_start,
+                    "managed_devices": self.managed_devices}
 
 class TokenBucketForwarder:
     """Real per-device bandwidth shaping (MITM relay).
@@ -297,14 +324,22 @@ class TokenBucketForwarder:
     def set_target(self, ip, kbps, mac=None, watch=False):
         with self.lock:
             if kbps and kbps > 0:
-                self._targets[ip] = {"kbps": kbps, "mac": mac,
-                                     "watch": bool(watch),
-                                     "q": deque(), "cq": deque(),
-                                     "qbytes": 0, "cbytes": 0,
-                                     "tokens": 0.0, "last": time.time(),
-                                     "bw_bytes": 0, "bw_last": time.time(),
-                                     "down": 0, "up": 0,
-                                     "trace": deque(maxlen=24)}
+                existing = self._targets.get(ip)
+                if existing:
+                    existing["kbps"] = kbps
+                    existing["mac"] = mac or existing["mac"]
+                    existing["watch"] = bool(watch)
+                else:
+                    rate = (kbps * 1000) / 8.0
+                    self._targets[ip] = {"kbps": kbps, "mac": mac,
+                                         "watch": bool(watch),
+                                         "q": deque(), "cq": deque(),
+                                         "qbytes": 0, "cbytes": 0,
+                                         "tokens": min(rate * 0.05, 64 * 1024),
+                                         "last": time.time(),
+                                         "bw_bytes": 0, "bw_last": time.time(),
+                                         "down": 0, "up": 0,
+                                         "trace": deque(maxlen=24)}
             else:
                 self._targets.pop(ip, None)
 
@@ -496,10 +531,12 @@ class NetCutController:
         self.capture_stop = threading.Event()
         self.our_mac = None
         self.our_ip = None
+        self.state_lock = threading.RLock()
 
     def save_quota(self):
-        self.saved_data['quota'] = self.quota.state()
-        with open(DATA_FILE, 'w') as f: json.dump(self.saved_data, f, indent=2)
+        with self.state_lock:
+            self.saved_data['quota'] = self.quota.state()
+            self._write_saved()
 
     def load_saved(self):
         if DATA_FILE.exists():
@@ -509,10 +546,19 @@ class NetCutController:
         return {}
 
     def save_device(self, mac, data):
-        entry = self.saved_data.get(mac, {})
-        entry.update(data)
-        self.saved_data[mac] = entry
-        with open(DATA_FILE, 'w') as f: json.dump(self.saved_data, f, indent=2)
+        with self.state_lock:
+            entry = self.saved_data.get(mac, {})
+            entry.update(data)
+            self.saved_data[mac] = entry
+            self._write_saved()
+
+    def _write_saved(self):
+        temp_file = DATA_FILE.with_suffix('.json.tmp')
+        with open(temp_file, 'w') as f:
+            json.dump(self.saved_data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, DATA_FILE)
 
     def get_vendor(self, mac):
         saved = self.saved_data.get(mac, {})
@@ -578,7 +624,19 @@ class NetCutController:
 
     def arp_scan(self, passes=2, timeout=2.0):
         conf.verb = 0
-        target = self.gateway_ip.rsplit('.', 1)[0] + ".1/24"
+        netmask = None
+        try:
+            addresses = netifaces.ifaddresses(self.interface).get(netifaces.AF_INET, [])
+            for address in addresses:
+                if address.get('addr') == self.ip:
+                    netmask = address.get('netmask')
+                    break
+        except (ValueError, OSError):
+            pass
+        try:
+            target = str(ipaddress.ip_network(f"{self.ip}/{netmask or '255.255.255.0'}", strict=False))
+        except ValueError:
+            target = self.gateway_ip.rsplit('.', 1)[0] + ".0/24"
         req = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=target)
         result = {}
         for _ in range(passes):
@@ -598,26 +656,29 @@ class NetCutController:
 
     def scan_network(self):
         self.scanning = True; self.scan_progress = 0
-        for d in self.devices:
-            if d.spoof_stop: d.spoof_stop.set()
-            d.spoof_stop = None; d.spoof_thread = None
+        try:
+            for d in self.devices:
+                if d.spoof_stop: d.spoof_stop.set()
+                d.spoof_stop = None; d.spoof_thread = None
 
-        self.scan_progress = 10
-        found = self.arp_scan(passes=2)
-        self.scan_progress = 60
-        self.forwarder.configure(gateway_mac=self.gateway_mac)
-        self.merge_scan_results(found)
-        for d in self.devices:
-            if d.state in ("Disconnected", "Throttled"):
-                self._start_spoof(d)
-        self.devices.sort(key=lambda x: x.ip)
-        self.scan_progress = 100
-        self._start_capture()
-        self.scanning = False
-        return self.devices
+            self.scan_progress = 10
+            found = self.arp_scan(passes=2)
+            self.scan_progress = 60
+            self.forwarder.configure(gateway_mac=self.gateway_mac)
+            self.merge_scan_results(found)
+            self.devices.sort(key=lambda x: x.ip)
+            self.scan_progress = 100
+            self._start_capture()
+            return self.devices
+        finally:
+            for d in self.devices:
+                if d.state in ("Disconnected", "Throttled", "Watched"):
+                    self._start_spoof(d)
+            self.scanning = False
 
     def _start_capture(self):
         self.traffic.stop(); self.traffic.start(self.interface)
+        self._last_traffic_total = 0
         self.watcher.set_stop(); self.watcher.start(self.interface)
         self.forwarder.start()
         if self.capture_thread and self.capture_thread.is_alive():
@@ -629,8 +690,12 @@ class NetCutController:
     def _capture_loop(self):
         def feed(pkt):
             self._arp_owner(pkt)
-            self.traffic.packet_handler(pkt)
-            self.watcher.packet_handler(pkt)
+            tracked_ips = {d.ip for d in self.devices
+                           if d.ip != self.gateway_ip and d.mac != self.our_mac}
+            blocked_ips = {d.ip for d in self.devices if d.state == "Disconnected"}
+            self.traffic.packet_handler(pkt, tracked_ips, blocked_ips, self.our_mac)
+            if IP not in pkt or not ({pkt[IP].src, pkt[IP].dst} & blocked_ips):
+                self.watcher.packet_handler(pkt)
             self.forwarder._on_packet(pkt)
         sniff(iface=self.interface, prn=feed, store=0,
               stop_filter=lambda p: self.capture_stop.is_set())
@@ -752,50 +817,53 @@ class NetCutController:
         p1 = Ether(dst=dev.mac) / ARP(op=2, pdst=dev.ip, hwdst=dev.mac, psrc=self.gateway_ip, hwsrc=self.our_mac)
         p2 = Ether(dst=self.gateway_mac) / ARP(op=2, pdst=self.gateway_ip, hwdst=self.gateway_mac, psrc=dev.ip, hwsrc=self.our_mac)
         while dev.spoof_stop and not dev.spoof_stop.is_set():
-            sendp(p1, iface=self.interface, verbose=False)
-            sendp(p2, iface=self.interface, verbose=False)
-            sendp(protect, iface=self.interface, verbose=False)
+            self._arp_send(p1)
+            self._arp_send(p2)
+            self._arp_send(protect)
             time.sleep(2.5)
 
     def _restore(self, dev):
         p1 = Ether(dst=dev.mac) / ARP(op=2, pdst=dev.ip, hwdst=dev.mac, psrc=self.gateway_ip, hwsrc=self.gateway_mac)
         p2 = Ether(dst=self.gateway_mac) / ARP(op=2, pdst=self.gateway_ip, hwdst=self.gateway_mac, psrc=dev.ip, hwsrc=dev.mac)
-        sendp(p1, count=5, iface=self.interface, verbose=False)
-        sendp(p2, count=5, iface=self.interface, verbose=False)
+        for _ in range(5):
+            self._arp_send(p1)
+            self._arp_send(p2)
 
-    def toggle_device(self, mac):
+    def _quota_restricted(self, mac, bypass_quota):
+        return (not bypass_quota and self.quota.mode in ("throttle", "block")
+                and mac in self.quota.managed_devices)
+
+    def toggle_device(self, mac, bypass_quota=False):
         for d in self.devices:
             if d.mac == mac:
                 if d.ip == self.gateway_ip: return False, "Cannot touch gateway."
                 if d.mac == self.our_mac: return False, "Cannot touch your own device."
-                if d.state == "Connected":
+                if self._quota_restricted(mac, bypass_quota):
+                    return False, "Quota Auto-Mode is controlling this device."
+                if d.state != "Disconnected":
                     d.state = "Disconnected"
                     d.watch = False
+                    d.throttle_kbps = None
+                    self.forwarder.set_target(d.ip, 0)
                     self._start_spoof(d)
+                    self.traffic.clear_ip(d.ip)
                     self.save_device(mac, {"state": "Disconnected", "throttle_kbps": None})
                     return True, "Disconnected"
-                elif d.state == "Disconnected":
-                    self._stop_spoof(d)
-                    self._restore(d)
-                    d.state = "Connected"
-                    self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
-                    return True, "Connected"
                 else:
                     self._stop_spoof(d)
                     self._restore(d)
                     d.state = "Connected"
-                    d.throttle_kbps = None
-                    d.watch = False
-                    self.forwarder.set_target(d.ip, 0)
                     self.save_device(mac, {"state": "Connected", "throttle_kbps": None})
                     return True, "Connected"
         return False, "Not found."
 
-    def set_throttle(self, mac, kbps):
+    def set_throttle(self, mac, kbps, bypass_quota=False):
         for d in self.devices:
             if d.mac == mac:
                 if d.ip == self.gateway_ip: return False, "Cannot touch gateway."
                 if d.mac == self.our_mac: return False, "Cannot touch your own device."
+                if self._quota_restricted(mac, bypass_quota):
+                    return False, "Quota Auto-Mode is controlling this device."
                 if not kbps or kbps <= 0:
                     self._stop_spoof(d)
                     self._restore(d)
@@ -814,11 +882,13 @@ class NetCutController:
                 return True, f"Throttled to {kbps} kbps"
         return False, "Not found."
 
-    def set_watch(self, mac, watch):
+    def set_watch(self, mac, watch, bypass_quota=False):
         for d in self.devices:
             if d.mac == mac:
                 if d.ip == self.gateway_ip: return False, "Cannot touch gateway."
                 if d.mac == self.our_mac: return False, "Cannot watch your own device."
+                if self._quota_restricted(mac, bypass_quota):
+                    return False, "Quota Auto-Mode is controlling this device."
                 if watch:
                     d.watch = True
                     d.state = "Watched"
@@ -845,14 +915,14 @@ class NetCutController:
                 return True
         return False
 
-    def throttle_all(self, kbps):
+    def throttle_all(self, kbps, bypass_quota=False):
         count = 0
         for d in self.devices:
             if d.ip == self.gateway_ip or d.mac == self.our_mac:
                 continue
             if d.state == "Offline":
                 continue
-            ok, _ = self.set_throttle(d.mac, kbps)
+            ok, _ = self.set_throttle(d.mac, kbps, bypass_quota=bypass_quota)
             if ok: count += 1
         return count
 
@@ -866,39 +936,86 @@ class NetCutController:
         except Exception:
             pass
 
+    def _device_snapshot(self, device):
+        return {"state": device.state,
+                "throttle_kbps": device.throttle_kbps,
+                "watch": bool(device.watch)}
+
+    def _restore_quota_devices(self):
+        snapshots = dict(self.quota.managed_devices)
+        self.quota.mode = None
+        restored = set()
+        for d in self.devices:
+            original = snapshots.get(d.mac)
+            if not original or d.state == "Offline":
+                continue
+            state = original.get("state", "Connected")
+            if state == "Disconnected":
+                if d.state != "Disconnected":
+                    self.toggle_device(d.mac, bypass_quota=True)
+            elif state == "Throttled":
+                self.set_throttle(d.mac, int(original.get("throttle_kbps") or 300),
+                                  bypass_quota=True)
+            elif state == "Watched" or original.get("watch"):
+                self.set_watch(d.mac, True, bypass_quota=True)
+            else:
+                self.set_throttle(d.mac, 0, bypass_quota=True)
+            restored.add(d.mac)
+        for mac in restored:
+            self.quota.managed_devices.pop(mac, None)
+
+    def _apply_quota_mode(self, mode):
+        if mode is None:
+            self._restore_quota_devices()
+            return
+        self.quota.mode = mode
+        for d in self.devices:
+            if (d.ip == self.gateway_ip or d.mac == self.our_mac
+                    or d.state == "Offline"):
+                continue
+            if d.mac not in self.quota.managed_devices:
+                self.quota.managed_devices[d.mac] = self._device_snapshot(d)
+            if mode == "block":
+                if d.state != "Disconnected":
+                    self.toggle_device(d.mac, bypass_quota=True)
+            elif d.state != "Throttled" or d.throttle_kbps != self.quota.throttle_kbps:
+                self.set_throttle(d.mac, self.quota.throttle_kbps, bypass_quota=True)
+
     def _enforce_quota(self):
         self._accumulate_usage()
-        if not self.quota.enabled or self.quota.limit_gb <= 0:
-            return
-        pct = self.quota.percent()
-        if pct >= self.quota.block_pct and self.quota.mode != "block":
-            self.quota.mode = "block"
-            for d in self.devices:
-                if d.ip == self.gateway_ip or d.mac == self.our_mac:
-                    continue
-                if d.state != "Disconnected":
-                    self.toggle_device(d.mac)
-        elif pct >= self.quota.throttle_pct and self.quota.mode != "throttle":
-            self.quota.mode = "throttle"
-            self.throttle_all(self.quota.throttle_kbps)
+        mode = None
+        if self.quota.enabled and self.quota.limit_gb > 0:
+            pct = self.quota.percent()
+            if pct >= self.quota.block_pct:
+                mode = "block"
+            elif pct >= self.quota.throttle_pct:
+                mode = "throttle"
+        self._apply_quota_mode(mode)
         self.save_quota()
 
     def quota_info(self):
         self._accumulate_usage()
         return self.quota.to_dict()
 
-    def restore_all(self):
-        self.traffic.stop()
-        self.forwarder.set_stop(); self.forwarder.clear()
-        self.watcher.set_stop()
-        if self.capture_stop: self.capture_stop.set()
-        if self.auto_scan_thread: self.auto_scan_stop.set()
+    def restore_all(self, stop_services=False):
+        if stop_services:
+            self.traffic.stop()
+            self.forwarder.set_stop()
+            self.watcher.set_stop()
+            if self.capture_stop: self.capture_stop.set()
+            if self.auto_scan_thread: self.auto_scan_stop.set()
+        self.forwarder.clear()
+        self.quota.mode = None
+        self.quota.managed_devices.clear()
+        if not stop_services:
+            self.quota.enabled = False
         for d in self.devices:
             self._stop_spoof(d); self._restore(d)
             d.state = "Connected"
             d.throttle_kbps = None
             d.watch = False
             self.save_device(d.mac, {"state": "Connected", "throttle_kbps": None})
+        self.save_quota()
 
     def auto_scan_loop(self):
         while not self.auto_scan_stop.is_set():
@@ -926,13 +1043,15 @@ def index(): return render_template('index.html')
 @app.route('/api/devices')
 def get_devices():
     t = controller.traffic.get_traffic()
-    return jsonify([{**d.to_dict(), "traffic_kb": t.get(d.ip, 0)} for d in controller.devices])
+    return jsonify([{**d.to_dict(),
+                     "traffic_kb": 0 if d.state == "Disconnected" else t.get(d.ip, 0)}
+                    for d in controller.devices])
 
 @app.route('/api/info')
 def get_info():
     return jsonify({"ip": controller.ip, "gateway": controller.gateway_ip,
         "interface": controller.interface, "scanning": controller.scanning,
-        "scan_progress": controller.scan_progress})
+        "scan_progress": controller.scan_progress, "version": VERSION})
 
 @app.route('/api/scan', methods=['POST'])
 def scan():
@@ -941,27 +1060,42 @@ def scan():
 
 @app.route('/api/toggle', methods=['POST'])
 def toggle():
-    data = request.get_json()
-    ok, s = controller.toggle_device(data['mac'])
-    return jsonify({"success": ok, "state": s})
+    data = request.get_json(silent=True) or {}
+    mac = data.get('mac')
+    if not isinstance(mac, str):
+        return jsonify({"success": False, "error": "A valid MAC address is required."}), 400
+    ok, s = controller.toggle_device(mac)
+    return jsonify({"success": ok, "state": s}), (200 if ok else 409)
 
 @app.route('/api/throttle', methods=['POST'])
 def throttle():
-    data = request.get_json()
-    ok, s = controller.set_throttle(data['mac'], int(data.get('kbps', 0)))
-    return jsonify({"success": ok, "state": s})
+    data = request.get_json(silent=True) or {}
+    try:
+        mac = data['mac']; kbps = int(data.get('kbps', 0))
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"success": False, "error": "MAC and numeric speed are required."}), 400
+    if not isinstance(mac, str) or not 0 <= kbps <= 30000:
+        return jsonify({"success": False, "error": "Speed must be between 0 and 30000 kbps."}), 400
+    ok, s = controller.set_throttle(mac, kbps)
+    return jsonify({"success": ok, "state": s}), (200 if ok else 409)
 
 @app.route('/api/watch', methods=['POST'])
 def watch():
-    data = request.get_json()
-    ok, s = controller.set_watch(data['mac'], bool(data.get('watch', False)))
-    return jsonify({"success": ok, "state": s})
+    data = request.get_json(silent=True) or {}
+    mac = data.get('mac')
+    if not isinstance(mac, str) or not isinstance(data.get('watch'), bool):
+        return jsonify({"success": False, "error": "MAC and boolean watch state are required."}), 400
+    ok, s = controller.set_watch(mac, data['watch'])
+    return jsonify({"success": ok, "state": s}), (200 if ok else 409)
 
 @app.route('/api/rename', methods=['POST'])
 def rename():
-    data = request.get_json()
-    ok = controller.rename_device(data['mac'], data['name'])
-    return jsonify({"success": ok})
+    data = request.get_json(silent=True) or {}
+    mac = data.get('mac'); name = data.get('name')
+    if not isinstance(mac, str) or not isinstance(name, str) or len(name.strip()) > 40:
+        return jsonify({"success": False, "error": "Name must be 40 characters or fewer."}), 400
+    ok = controller.rename_device(mac, name.strip())
+    return jsonify({"success": ok}), (200 if ok else 404)
 
 @app.route('/api/restore_all', methods=['POST'])
 def restore_all():
@@ -973,8 +1107,13 @@ def forwarder_info():
 
 @app.route('/api/throttle_all', methods=['POST'])
 def throttle_all():
-    data = request.get_json()
-    count = controller.throttle_all(int(data.get('kbps', 0)))
+    data = request.get_json(silent=True) or {}
+    try: kbps = int(data.get('kbps', 0))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Speed must be numeric."}), 400
+    if not 0 <= kbps <= 30000:
+        return jsonify({"success": False, "error": "Speed must be between 0 and 30000 kbps."}), 400
+    count = controller.throttle_all(kbps)
     return jsonify({"status": "ok", "count": count})
 
 @app.route('/api/quota', methods=['GET'])
@@ -988,20 +1127,37 @@ def domains_get():
 
 @app.route('/api/quota', methods=['POST'])
 def quota_set():
-    data = request.get_json()
-    if "enabled" in data: controller.quota.enabled = bool(data["enabled"])
-    if "limit_gb" in data: controller.quota.limit_gb = float(data["limit_gb"])
-    if "throttle_kbps" in data: controller.quota.throttle_kbps = int(data["throttle_kbps"])
-    if "throttle_pct" in data: controller.quota.throttle_pct = float(data["throttle_pct"])
-    if "block_pct" in data: controller.quota.block_pct = float(data["block_pct"])
+    data = request.get_json(silent=True) or {}
+    try:
+        enabled = data.get("enabled", controller.quota.enabled)
+        limit_gb = float(data.get("limit_gb", controller.quota.limit_gb))
+        throttle_kbps = int(data.get("throttle_kbps", controller.quota.throttle_kbps))
+        throttle_pct = float(data.get("throttle_pct", controller.quota.throttle_pct))
+        block_pct = float(data.get("block_pct", controller.quota.block_pct))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Quota values must be numeric."}), 400
+    if not isinstance(enabled, bool):
+        return jsonify({"success": False, "error": "Enabled must be true or false."}), 400
+    if not all(math.isfinite(v) for v in (limit_gb, throttle_pct, block_pct)):
+        return jsonify({"success": False, "error": "Quota values must be finite."}), 400
+    if limit_gb < 0 or not 1 <= throttle_pct <= 100 or not 1 <= block_pct <= 100:
+        return jsonify({"success": False, "error": "Use a non-negative limit and percentages from 1 to 100."}), 400
+    if throttle_pct >= block_pct:
+        return jsonify({"success": False, "error": "Throttle percentage must be lower than block percentage."}), 400
+    if not 1 <= throttle_kbps <= 30000:
+        return jsonify({"success": False, "error": "Quota speed must be between 1 and 30000 kbps."}), 400
+    controller.quota.enabled = enabled
+    controller.quota.limit_gb = limit_gb
+    controller.quota.throttle_kbps = throttle_kbps
+    controller.quota.throttle_pct = throttle_pct
+    controller.quota.block_pct = block_pct
     if data.get("reset"):
         controller.quota.reset()
-    controller.save_quota()
     controller._enforce_quota()
-    return jsonify(controller.quota_info())
+    return jsonify({"success": True, **controller.quota_info()})
 
 def cleanup():
-    print("\nRestoring all..."); controller.restore_all()
+    print("\nRestoring all..."); controller.restore_all(stop_services=True)
 
 if __name__ == '__main__':
     import ctypes

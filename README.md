@@ -1,8 +1,23 @@
 # Fnet — NetCut Pro
 
+![Version](https://img.shields.io/badge/version-2.0.0-7c6cff)
+![Python](https://img.shields.io/badge/Python-3.10%2B-31c8ff)
+
 An interactive network management, auditing, and **bandwidth control** tool written in Python with a web UI. It scans your local subnet, identifies connected devices (hostname + MAC vendor), and lets you control their internet access using ARP cache poisoning — cutting them off, rate-limiting them, or enforcing an internet quota automatically.
 
 **⚠️ Disclaimer:** This tool is strictly for educational purposes and authorized penetration testing. You must only run this on networks you own or have explicit, written permission to audit. The author is not responsible for any misuse or damage caused by this software.
+
+---
+
+## What's New in v2.0.0
+
+* Redesigned navy, violet, and cyan dashboard with clearer control and device states.
+* Rebuilt quota state management: disabling or resetting Auto-Mode restores every device to its previous manual state.
+* Correct single-count quota accounting that excludes relay duplicates, LAN-only transfers, and blocked packet attempts.
+* Blocked devices now show **No access** instead of a misleading historical traffic value.
+* Fixed block actions for watched/throttled devices, live quota downgrades, newly discovered devices, and persistent manual limits.
+* Fixed **Restore All** so it disables Auto-Mode and restores devices without stopping capture or automatic scanning.
+* Added subnet-aware discovery, atomic state saving, validated API inputs, and regression tests for quota and traffic logic.
 
 ---
 
@@ -49,10 +64,11 @@ Watch which websites each device is visiting, live:
 ### Quota Auto-Mode
 Save your router's monthly internet allowance automatically:
 * Set a **monthly limit (GB)**, a **throttle threshold (%)**, and a **block threshold (%)**.
-* The app accumulates actual traffic flowing through the interface.
+* The app counts observed internet traffic once, excluding relay copies, local device-to-device traffic, and packets attempted while a device is blocked.
 * When usage passes the throttle %, **all devices are automatically throttled** to your chosen speed.
 * When it passes the block %, **all devices are blocked** entirely.
-* Reset the meter for a new month with one click.
+* When Auto-Mode is disabled or reset, each device returns to the manual state it had before quota enforcement began.
+* Reset the meter for a new billing period with one click.
 
 ---
 
@@ -144,7 +160,14 @@ Keep the terminal running and browse to [http://127.0.0.1:5000](http://127.0.0.1
 | `netcut.py` | Original CLI client |
 | `requirements.txt` | Python runtime dependencies |
 | `docs/dashboard.png` | Dashboard screenshot with fictional sample data |
+| `tests/test_app.py` | Regression tests for traffic accounting, blocking, restoration, and quota transitions |
 | `devices.json` | Saved device names, block/throttle states, quota (auto-generated) |
+
+Run the regression suite without touching the network:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ---
 

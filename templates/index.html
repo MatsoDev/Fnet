@@ -5,32 +5,44 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NetCut Pro</title>
 <style>
+  :root {
+    --bg: #070b18; --surface: #10172a; --surface-2: #151f36;
+    --border: #273654; --text: #e8eefc; --muted: #91a0bd;
+    --primary: #7c6cff; --primary-2: #31c8ff; --success: #2dd4a3;
+    --warning: #ffbd5c; --danger: #ff5d73;
+  }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0d1117; color: #c9d1d9; min-height: 100vh;
+    background: radial-gradient(circle at 15% -10%, #20205c 0, transparent 36%), var(--bg);
+    color: var(--text); min-height: 100vh;
   }
-  .container { max-width: 1000px; margin: 0 auto; padding: 20px; }
+  .container { max-width: 1120px; margin: 0 auto; padding: 24px 20px 40px; }
 
   header {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 16px 0; border-bottom: 1px solid #30363d; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;
+    padding: 18px 20px; border: 1px solid var(--border); margin-bottom: 16px;
+    border-radius: 14px; background: linear-gradient(135deg, rgba(124,108,255,.14), rgba(49,200,255,.04));
+    box-shadow: 0 18px 50px rgba(0,0,0,.2); flex-wrap: wrap; gap: 10px;
   }
-  header h1 { font-size: 22px; font-weight: 700; color: #58a6ff; }
-  header .info { font-size: 13px; color: #8b949e; }
-  header .info span { color: #c9d1d9; }
+  header h1 { font-size: 24px; font-weight: 750; color: var(--text); letter-spacing: -.4px; }
+  header h1 span { color: var(--primary-2); }
+  header .info { font-size: 13px; color: var(--muted); }
+  header .info span { color: var(--text); }
+  .version-badge { display:inline-flex; margin-left:8px; padding:2px 7px; border-radius:99px;
+    background:#7c6cff22; border:1px solid #7c6cff66; color:#b9b0ff; font-size:10px; vertical-align:middle; }
 
   .toolbar { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
   .btn {
     padding: 8px 18px; border: 1px solid #30363d; border-radius: 6px;
-    background: #21262d; color: #c9d1d9; cursor: pointer; font-size: 14px;
-    transition: background .2s; display: inline-flex; align-items: center; gap: 6px;
+    background: var(--surface-2); color: var(--text); cursor: pointer; font-size: 14px;
+    transition: transform .15s, background .2s, border-color .2s; display: inline-flex; align-items: center; gap: 6px;
   }
-  .btn:hover { background: #30363d; }
-  .btn-primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
-  .btn-primary:hover { background: #388bfd; }
-  .btn-danger { background: #da3633; border-color: #da3633; color: #fff; }
-  .btn-danger:hover { background: #f85149; }
+  .btn:hover { background: #202d49; border-color:#526789; transform:translateY(-1px); }
+  .btn-primary { background: linear-gradient(135deg, var(--primary), #5668ff); border-color: #8d80ff; color: #fff; }
+  .btn-primary:hover { background: linear-gradient(135deg, #8d80ff, #6575ff); }
+  .btn-danger { background: #ff5d7322; border-color: #ff5d7388; color: #ff9dac; }
+  .btn-danger:hover { background: #ff5d7338; }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
   .btn-sm { padding: 4px 12px; font-size: 12px; }
 
@@ -68,8 +80,8 @@
 
   .quota-panel {
     display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
-    padding: 10px 14px; background: #161b22; border: 1px solid #30363d;
-    border-radius: 8px; margin-bottom: 12px; font-size: 13px; position: relative;
+    padding: 14px 16px; background: linear-gradient(135deg, #131a31, #101827); border: 1px solid #344263;
+    border-radius: 12px; margin-bottom: 14px; font-size: 13px; position: relative;
   }
   .quota-toggle { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
   .quota-toggle b { color: #d29922; }
@@ -88,9 +100,10 @@
     overflow: hidden; margin-top: 4px;
   }
   .quota-bar-fill {
-    height: 100%; background: linear-gradient(90deg, #3fb950, #d29922, #da3633);
+    height: 100%; background: linear-gradient(90deg, var(--success), var(--warning), var(--danger));
     border-radius: 2px; transition: width .4s;
   }
+  .quota-help { width:100%; color:var(--muted); font-size:11px; margin-top:-3px; }
 
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(1,4,9,.7);
@@ -163,13 +176,15 @@
 
   .device-card {
     display: flex; align-items: center; gap: 10px;
-    padding: 10px 14px; background: #161b22; border: 1px solid #30363d;
-    border-radius: 8px; margin-bottom: 5px; transition: border-color .2s;
+    padding: 12px 14px; background: linear-gradient(135deg, var(--surface), #0d1526);
+    border: 1px solid var(--border); border-radius: 10px; margin-bottom: 7px;
+    transition: border-color .2s, transform .15s, box-shadow .2s;
   }
-  .device-card.disconnected { border-color: #da3633; background: #1c1010; }
-  .device-card.throttled { border-color: #d29922; background: #1c160d; }
-  .device-card.watched { border-color: #58a6ff; background: #0d1720; }
-  .device-card.router { border-color: #3fb950; background: #0d1f0d; }
+  .device-card:hover { transform:translateY(-1px); box-shadow:0 10px 30px rgba(0,0,0,.18); }
+  .device-card.disconnected { border-color: #ff5d7388; background: #24101c; }
+  .device-card.throttled { border-color: #ffbd5c88; background: #211a12; }
+  .device-card.watched { border-color: #31c8ff88; background: #0b1d2b; }
+  .device-card.router { border-color: #2dd4a388; background: #0b201d; }
   .device-card.offline { border-color: #30363d; opacity: .65; }
 
   .device-status {
@@ -213,6 +228,7 @@
     margin-top: 2px; margin-left: auto; overflow: hidden;
   }
   .traffic-bar-fill { height: 100%; background: #58a6ff; border-radius: 2px; transition: width .5s; }
+  .traffic-blocked { color:#ff8799; font-weight:650; font-size:11px; text-transform:uppercase; letter-spacing:.4px; }
 
   .device-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
   .toggle-btn {
@@ -258,7 +274,7 @@
 <div class="container">
   <header>
     <div>
-      <h1>NetCut Pro</h1>
+      <h1>Fnet <span>Control</span><span class="version-badge" id="versionBadge">v2.0.0</span></h1>
       <div class="info" id="headerInfo">Loading...</div>
     </div>
     <div class="info" style="font-size:12px;display:flex;gap:10px;align-items:center">
@@ -286,13 +302,15 @@
 
   <div class="quota-panel">
     <label class="quota-toggle"><input type="checkbox" id="quotaEnabled" onchange="saveQuota()"> <b>Quota Auto-Mode</b></label>
-    <span>Limit <input type="number" id="quotaLimit" min="0" step="0.5" value="0" onchange="saveQuota()" class="quota-num"> GB</span>
-    <span>Throttle at <input type="number" id="quotaThrottlePct" min="1" max="100" value="80" onchange="saveQuota()" class="quota-num quota-sm">%</span>
-    <span>Block at <input type="number" id="quotaBlockPct" min="1" max="100" value="100" onchange="saveQuota()" class="quota-num quota-sm">%</span>
-    <span>Speed <input type="number" id="quotaKbps" min="1" value="300" onchange="saveQuota()" class="quota-num"> kbps</span>
-    <span class="quota-used">Used: <b id="quotaUsed">0 MB</b> (<span id="quotaPct">0%</span>) <span id="quotaMode"></span></span>
+    <span>Limit <input type="number" id="quotaLimit" min="0" step="0.5" value="0" class="quota-num"> GB</span>
+    <span>Throttle at <input type="number" id="quotaThrottlePct" min="1" max="100" value="80" class="quota-num quota-sm">%</span>
+    <span>Block at <input type="number" id="quotaBlockPct" min="1" max="100" value="100" class="quota-num quota-sm">%</span>
+    <span>Speed <input type="number" id="quotaKbps" min="1" max="30000" value="300" class="quota-num"> kbps</span>
+    <span class="quota-used" title="Observed internet traffic for discovered devices; blocked attempts are excluded">Observed: <b id="quotaUsed">0 MB</b> (<span id="quotaPct">0%</span>) <span id="quotaMode"></span></span>
+    <button class="btn btn-sm btn-primary" onclick="saveQuota()">Apply</button>
     <button class="btn btn-sm" onclick="resetQuota()">Reset</button>
     <div class="quota-bar"><div class="quota-bar-fill" id="quotaBar"></div></div>
+    <div class="quota-help" id="quotaHelp">Auto-Mode restores each device's previous state when usage drops below the threshold or the mode is disabled.</div>
   </div>
 
   <div class="legend">
@@ -337,13 +355,16 @@
 
 <script>
 let sortBy = 'ip';
+let quotaDirty = false;
 
 async function api(url, opts) {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...(opts || {})
   });
-  return res.json();
+  const data = await res.json();
+  data._ok = res.ok;
+  return data;
 }
 
 function toast(msg, type) {
@@ -359,6 +380,7 @@ async function loadInfo() {
       document.getElementById('headerInfo').textContent =
         info.interface.replace(/\u200f/g,'') + ' \u00b7 ' + info.ip + ' \u2192 Gateway: ' + info.gateway;
     }
+    if (info.version) document.getElementById('versionBadge').textContent = 'v' + info.version;
     document.getElementById('autoBadge').textContent = 'Auto: on';
     document.getElementById('autoBadge').style.color = '#3fb950';
     const wrap = document.getElementById('scanBarWrap');
@@ -411,21 +433,21 @@ function setSort(s) {
 
 async function toggleDevice(mac) {
   const d = await api('/api/toggle', { method: 'POST', body: JSON.stringify({ mac }) });
-  if (!d.success) { toast(d.state, 'error'); return; }
+  if (!d.success) { toast(d.error || d.state, 'error'); return; }
   toast(d.state === 'Disconnected' ? 'Device blocked' : 'Device restored');
   loadDevices();
 }
 
 async function setThrottle(mac, kbps) {
   const d = await api('/api/throttle', { method: 'POST', body: JSON.stringify({ mac, kbps: parseInt(kbps) }) });
-  if (!d.success) { toast(d.state, 'error'); loadDevices(); return; }
+  if (!d.success) { toast(d.error || d.state, 'error'); loadDevices(); return; }
   toast(d.state);
   loadDevices();
 }
 
 async function setWatch(mac, watch) {
   const d = await api('/api/watch', { method: 'POST', body: JSON.stringify({ mac, watch }) });
-  if (!d.success) { toast(d.state, 'error'); loadDevices(); return; }
+  if (!d.success) { toast(d.error || d.state, 'error'); loadDevices(); return; }
   toast(d.state === 'Watched' ? 'Now watching traffic for this device' : 'Watch stopped');
   loadDevices();
 }
@@ -434,6 +456,7 @@ async function throttleAll() {
   const v = prompt('Set speed limit for ALL devices (kbps). 0 = remove limit:', 300);
   if (v === null) return;
   const d = await api('/api/throttle_all', { method: 'POST', body: JSON.stringify({ kbps: parseInt(v) }) });
+  if (!d._ok) { toast(d.error || 'Could not apply limit', 'error'); return; }
   toast(`Applied to ${d.count} device(s)`);
   loadDevices();
 }
@@ -442,18 +465,28 @@ async function loadQuota() {
   try {
     const q = await api('/api/quota');
     document.getElementById('quotaEnabled').checked = q.enabled;
-    document.getElementById('quotaLimit').value = q.limit_gb;
-    document.getElementById('quotaThrottlePct').value = q.throttle_pct;
-    document.getElementById('quotaBlockPct').value = q.block_pct;
-    document.getElementById('quotaKbps').value = q.throttle_kbps;
+    if (!quotaDirty) {
+      document.getElementById('quotaLimit').value = q.limit_gb;
+      document.getElementById('quotaThrottlePct').value = q.throttle_pct;
+      document.getElementById('quotaBlockPct').value = q.block_pct;
+      document.getElementById('quotaKbps').value = q.throttle_kbps;
+    }
     const used = document.getElementById('quotaUsed');
     used.textContent = q.used_mb >= 1024 ? (q.used_mb/1024).toFixed(2) + ' GB' : q.used_mb + ' MB';
     document.getElementById('quotaPct').textContent = q.used_pct + '%';
     document.getElementById('quotaBar').style.width = Math.min(q.used_pct, 100) + '%';
     const mode = document.getElementById('quotaMode');
-    if (q.mode === 'block') { mode.textContent = 'BLOCKING'; mode.className = 'active-block'; }
-    else if (q.mode === 'throttle') { mode.textContent = 'THROTTLING'; mode.className = 'active-throttle'; }
-    else { mode.textContent = ''; mode.className = ''; }
+    const help = document.getElementById('quotaHelp');
+    if (q.mode === 'block') {
+      mode.textContent = 'BLOCKING'; mode.className = 'active-block';
+      help.textContent = 'Block threshold reached. Managed devices have no access; their attempted packets are not counted as usage.';
+    } else if (q.mode === 'throttle') {
+      mode.textContent = 'THROTTLING'; mode.className = 'active-throttle';
+      help.textContent = `Throttle threshold reached. Managed devices are limited to ${fmtSpeed(q.throttle_kbps)}.`;
+    } else {
+      mode.textContent = ''; mode.className = '';
+      help.textContent = q.enabled ? 'Monitoring observed internet traffic. Device states are restored automatically when no quota action is required.' : 'Auto-Mode is off. Enable it after setting a limit and thresholds.';
+    }
   } catch(e) {}
 }
 
@@ -465,14 +498,20 @@ async function saveQuota() {
     block_pct: parseFloat(document.getElementById('quotaBlockPct').value) || 100,
     throttle_kbps: parseInt(document.getElementById('quotaKbps').value) || 300
   };
-  await api('/api/quota', { method: 'POST', body: JSON.stringify(body) });
-  loadQuota();
+  const q = await api('/api/quota', { method: 'POST', body: JSON.stringify(body) });
+  if (!q.success) { toast(q.error || 'Invalid quota settings', 'error'); loadQuota(); return; }
+  quotaDirty = false;
+  toast(q.mode ? `Quota mode: ${q.mode}` : (q.enabled ? 'Quota settings saved' : 'Quota Auto-Mode disabled'));
+  loadQuota(); loadDevices();
 }
 
 async function resetQuota() {
   if (!confirm('Reset monthly usage to 0?')) return;
-  await api('/api/quota', { method: 'POST', body: JSON.stringify({ reset: true }) });
-  loadQuota();
+  const q = await api('/api/quota', { method: 'POST', body: JSON.stringify({ reset: true }) });
+  if (!q.success) { toast(q.error || 'Could not reset quota', 'error'); return; }
+  quotaDirty = false;
+  toast('Quota usage reset and managed devices restored');
+  loadQuota(); loadDevices();
 }
 
 let watchTimer = null;
@@ -537,8 +576,8 @@ function restoreAll() {
   btn.disabled = true; btn.textContent = ' Restoring...';
   api('/api/restore_all', { method: 'POST' }).then(() => {
     btn.disabled = false; btn.textContent = ' Restore All';
-    loadDevices();
-    toast('All restored');
+    loadDevices(); loadQuota();
+    toast('All devices restored; Quota Auto-Mode disabled');
   });
 }
 
@@ -586,12 +625,14 @@ function render(devices) {
     const name = dev.custom_name || dev.display_name;
     const bw = Math.min(dev.traffic_kb / 10, 100);
     const thrKbps = isWatch ? 0 : (dev.throttle_kbps || 0);
+    const macArg = attr(JSON.stringify(dev.mac));
+    const nameArg = attr(JSON.stringify(name));
 
     return `<div class="device-card${isOff ? ' disconnected' : ''}${isThr ? ' throttled' : ''}${isWatch ? ' watched' : ''}${isRouter ? ' router' : ''}${isOffline ? ' offline' : ''}">
       <div class="device-status"></div>
       <div class="device-info">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-          <div class="device-name" onclick="startRename(this,'${dev.mac}','${esc(name)}')" title="Click to rename">${esc(name)}</div>
+          <div class="device-name" onclick="startRename(this,${macArg},${nameArg})" title="Click to rename">${esc(name)}</div>
           ${isOff ? '<span class="device-badge badge-cut">BLOCKED</span>' : ''}
           ${isThr ? `<span class="device-badge badge-throttle">LIMIT ${fmtSpeed(thrKbps)}</span>` : ''}
           ${isWatch ? '<span class="device-badge badge-throttle">WATCHING</span>' : ''}
@@ -604,22 +645,25 @@ function render(devices) {
         </div>
       </div>
       <div class="device-traffic">
-        <span class="num">${fmt(dev.traffic_kb)}</span> <span class="label">${unit(dev.traffic_kb)}</span>
-        <div class="traffic-bar"><div class="traffic-bar-fill" style="width:${bw}%"></div></div>
+        ${isOff ? '<span class="traffic-blocked">No access</span>' : `
+          <span class="num">${fmt(dev.traffic_kb)}</span> <span class="label">${unit(dev.traffic_kb)}</span>
+          <div class="traffic-bar"><div class="traffic-bar-fill" style="width:${bw}%"></div></div>`}
       </div>
       <div class="device-actions">
         ${isRouter ? '<span style="font-size:11px;color:#3fb950">Gateway</span>' : `
           ${isOffline ? '' : `
+          ${isOff ? '<span style="font-size:10px;color:#ff8799">Restore to manage</span>' : `
           <div class="throttle-ctl">
             <span class="throttle-label">Limit <b>${thrKbps ? fmtSpeed(thrKbps) : (isWatch ? 'Watch' : 'Off')}</b></span>
             ${isWatch ? '' : `<input type="range" class="throttle-slider" min="0" max="30000" step="100" value="${thrKbps}"
-              oninput="this.closest('.device-card').querySelector('.throttle-label b').textContent = (this.value ? fmtSpeed(this.value) : 'Off')"
-              onchange="setThrottle('${dev.mac}', this.value)" title="Throttle speed (0 - 30 Mbps)">`}
+              oninput="this.closest('.device-card').querySelector('.throttle-label b').textContent = (Number(this.value) > 0 ? fmtSpeed(this.value) : 'Off')"
+              onchange="setThrottle(${macArg}, this.value)" title="Throttle speed (0 - 30 Mbps)">`}
           </div>
           `}
+          `}
           <div style="display:flex;gap:6px;align-items:center">
-            <button class="btn btn-watch ${isWatch?'on':''}" onclick="setWatch('${dev.mac}', ${isWatch?'false':'true'})" title="Watch traffic for this device (relays at full speed)">${isWatch?'Watching':'Watch'}</button>
-            <button class="toggle-btn ${isOff?'off':'on'}" onclick="toggleDevice('${dev.mac}')" title="${isOff?'Restore':'Block'}"></button>
+            ${isOff ? '' : `<button class="btn btn-watch ${isWatch?'on':''}" onclick="setWatch(${macArg}, ${isWatch?'false':'true'})" title="Watch traffic for this device (relays at full speed)">${isWatch?'Watching':'Watch'}</button>`}
+            <button class="toggle-btn ${isOff?'off':'on'}" onclick="toggleDevice(${macArg})" title="${isOff?'Restore':'Block'}" aria-label="${isOff?'Restore':'Block'} ${attr(name)}"></button>
           </div>
         `}
       </div>
@@ -634,10 +678,13 @@ function render(devices) {
 }
 
 function esc(s) { const e=document.createElement('div'); e.textContent=s; return e.innerHTML; }
+function attr(s) { return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 loadInfo();
 loadDevices();
 loadQuota();
+['quotaLimit','quotaThrottlePct','quotaBlockPct','quotaKbps'].forEach(id =>
+  document.getElementById(id).addEventListener('input', () => { quotaDirty = true; }));
 setInterval(() => { loadInfo(); loadDevices(); loadQuota(); }, 3000);
 </script>
 </body>
